@@ -135,8 +135,12 @@ services:
       kafka: {condition: service_healthy}
     networks: [internal]
 
+  # The image's default entrypoint is ./bin/docker, which runs ./bin/migrate
+  # before serving; migrations are an explicit step here, and that script loops
+  # on schedule_temporal_workflows so the server never binds. Serve only.
   web:
     image: posthog/posthog:latest
+    command: ./bin/docker-server
     restart: unless-stopped
     environment: *posthog-environment
     depends_on:
@@ -150,21 +154,6 @@ services:
   worker:
     image: posthog/posthog:latest
     command: ./bin/docker-worker-celery --with-scheduler
-    restart: unless-stopped
-    environment: *posthog-environment
-    depends_on:
-      db: {condition: service_healthy}
-      redis: {condition: service_healthy}
-      clickhouse: {condition: service_healthy}
-      kafka: {condition: service_healthy}
-      temporal: {condition: service_healthy}
-    networks: [internal]
-
-  # Consumes the ingestion topics into ClickHouse. Without it capture writes to
-  # Kafka and nothing ever reads it, so events are accepted and never stored.
-  plugin-server:
-    image: posthog/posthog:latest
-    command: ./bin/plugin-server
     restart: unless-stopped
     environment: *posthog-environment
     depends_on:

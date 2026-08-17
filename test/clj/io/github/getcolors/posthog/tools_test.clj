@@ -135,8 +135,10 @@
   ;; for the schema to exist at all -- not only for events to flow.
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? compose "  kafka:"))
-    (is (str/includes? compose "  plugin-server:"))
-    (is (str/includes? compose "./bin/plugin-server"))
+    ;; posthog/posthog no longer ships a Node plugin-server; ClickHouse
+    ;; consumes the ingestion topics itself through its Kafka engine tables,
+    ;; which is what the named collections above are for.
+    (is (not (str/includes? compose "./bin/plugin-server")))
     (is (str/includes? compose "KAFKA_HOSTS"))
     ;; Every named collection the migrations may reference must resolve.
     ;; The full set from upstream's docker/clickhouse/config.d/default.xml;
@@ -169,7 +171,7 @@
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")
         parsed (yaml/parse-string compose)]
     (is (contains? (:services parsed) :web))
-    (is (= 9 (count (:services parsed))))))
+    (is (= 8 (count (:services parsed))))))
 
 (deftest temporal-dynamic-config-exists-in-the-image
   ;; Upstream mounts development-sql.yaml from its checkout; the auto-setup
@@ -178,3 +180,9 @@
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? compose "DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml"))
     (is (not (str/includes? compose "DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml")))))
+
+(deftest web_serves_without_rerunning_migrations
+  ;; ./bin/docker runs ./bin/migrate first and loops on
+  ;; schedule_temporal_workflows, so the server never binds.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "command: ./bin/docker-server"))))
