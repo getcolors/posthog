@@ -325,8 +325,12 @@
       args: {chdir: /opt/posthog}
       register: local_health
       changed_when: false
-      retries: 60
-      delay: 5
+      # NGINX Unit boots four Django workers, each loading the whole
+      # application; measured at well over five minutes on first start before
+      # /_health/ answers in under two seconds. Wait for the real thing rather
+      # than declaring failure while it is still coming up.
+      retries: 120
+      delay: 10
       until: local_health.rc == 0
   handlers:
     - name: Reload systemd
