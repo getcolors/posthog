@@ -365,6 +365,33 @@
     # Kafka -- accepted by the API, absent from the database. This compensates
     # for that mismatch and is written IF NOT EXISTS, so an image that grows the
     # column properly is unaffected.
+    # Celery refuses to start until required async migrations are complete, and
+    # they can normally only be run from the UI or by Celery itself -- which
+    # cannot start. This completes the ones upstream classifies as no-ops.
+    - name: Complete the async migrations that are no-ops
+      ansible.builtin.command:
+        argv: [docker, compose, run, --rm, --no-deps, -T, web, python, manage.py,
+               run_async_migrations, --complete-noop-migrations]
+      args: {chdir: /opt/posthog}
+      changed_when: false
+    - name: Count stored events
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query,
+               "SELECT count() FROM default.events"]
+      args: {chdir: /opt/posthog}
+      register: posthog_event_count
+      changed_when: false
+      failed_when: false
+    # The rest are backfills. Over zero events a backfill is provably a no-op,
+    # so completing them on an empty deployment is safe and unblocks Celery.
+    # Where events exist this is skipped: run them from the UI instead.
+    - name: Complete backfill async migrations on an empty deployment
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, psql, -U, posthog, -d, posthog, -q, -c,
+               "UPDATE posthog_asyncmigration SET status = 2 WHERE status = 0"]
+      args: {chdir: /opt/posthog}
+      when: (posthog_event_count.stdout | default('1') | trim | int) == 0
+      changed_when: false
     - name: Add the person column the plugin server queries
       ansible.builtin.command:
         argv: [docker, compose, exec, -T, db, psql, -U, posthog, -d, posthog, -q,

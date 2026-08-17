@@ -307,3 +307,13 @@
   (let [fixture (slurp "test/fixtures/colors.yml")]
     (is (re-find #"posthog-capture-image: \S+@sha256:[0-9a-f]{64}" fixture))
     (is (not (re-find #"image:\s*\S+:(latest|master)\s*$" fixture)))))
+
+(deftest celery-and-plugin-server-health-are-addressed
+  ;; PostHog's own setup UI reported both as errors: Celery could not start
+  ;; until required async migrations were complete, and the plugin server was
+  ;; probed through a Kubernetes service name that resolves nowhere here.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "CDP_API_URL: \"http://plugins:6738\""))
+    (is (str/includes? @playbook "--complete-noop-migrations"))
+    ;; Backfills are only completed where there is nothing to backfill.
+    (is (str/includes? @playbook "posthog_event_count.stdout"))))

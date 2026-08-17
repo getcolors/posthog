@@ -15,6 +15,10 @@ x-posthog-environment: &posthog-environment
   REDIS_URL: "redis://redis:6379/"
   KAFKA_HOSTS: "kafka:9092"
   KAFKA_URL: "kafka://kafka:9092"
+  # Django probes the plugin server through this to report its health, and the
+  # default is a Kubernetes service name that resolves nowhere here -- so a
+  # working plugin server is reported as an error in the setup UI.
+  CDP_API_URL: "http://plugins:6738"
   TEMPORAL_HOST: temporal
   TEMPORAL_PORT: "7233"
   # A block scalar keeps the file valid YAML both as a template and once
