@@ -63,3 +63,11 @@
     (is (not (tools/fresh-backup? [(entry 0 "2026-08-17T02:30:05Z")] since)))
     (is (not (tools/fresh-backup? [] since)))
     (is (not (tools/fresh-backup? nil since)))))
+
+(deftest clickhouse-backup-is-native-and-has-no-torn-fallback
+  ;; A hot tar of the data directory races running merges and produces an
+  ;; archive that cannot be restored; a failed backup must fail the run.
+  (let [backup (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/backup")]
+    (is (str/includes? backup "BACKUP DATABASE"))
+    (is (str/includes? backup "/var/lib/clickhouse/backups/"))
+    (is (not (str/includes? backup "tar -czf")))))
