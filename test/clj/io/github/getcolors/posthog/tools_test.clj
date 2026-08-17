@@ -1,5 +1,6 @@
 (ns io.github.getcolors.posthog.tools-test
-  (:require [clojure.string :as str]
+  (:require [clj-yaml.core :as yaml]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [io.github.getcolors.posthog.tools :as tools]
             [io.github.getcolors.posthog.validate-test :refer [fixture]]))
@@ -151,3 +152,21 @@
         migrate (str/index-of @playbook "manage.py migrate_clickhouse")]
     (is (some? flush))
     (is (< flush migrate))))
+
+(deftest temporal-is-present-and-gates-the-application
+  ;; Django's startup connects to Temporal through the Rust SDK bridge; when
+  ;; that fails the web process never binds, so this is a hard dependency
+  ;; rather than a degraded feature.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "  temporal:"))
+    (is (str/includes? compose "TEMPORAL_HOST: temporal"))
+    (is (str/includes? compose "temporal: {condition: service_healthy}"))))
+
+(deftest compose-template-is-valid-yaml
+  ;; The multi-line PEM has to reach the container without breaking the
+  ;; document: an unquoted {{ ... }} reads as a flow mapping and makes the file
+  ;; unparseable, which Docker only discovers on the host.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")
+        parsed (yaml/parse-string compose)]
+    (is (contains? (:services parsed) :web))
+    (is (= 9 (count (:services parsed))))))

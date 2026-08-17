@@ -15,9 +15,12 @@ x-posthog-environment: &posthog-environment
   REDIS_URL: "redis://redis:6379/"
   KAFKA_HOSTS: "kafka:9092"
   KAFKA_URL: "kafka://kafka:9092"
-  # A multi-line PEM cannot sit in a plain YAML scalar; to_json escapes the
-  # newlines and YAML unescapes them again, so the container sees the real key.
-  OIDC_RSA_PRIVATE_KEY: {{ lookup('env','COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY') | to_json }}
+  TEMPORAL_HOST: temporal
+  TEMPORAL_PORT: "7233"
+  # A block scalar keeps the file valid YAML both as a template and once
+  # rendered; indent() lines the PEM up under it.
+  OIDC_RSA_PRIVATE_KEY: |
+    {{ lookup('env','COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY') | indent(4) }}
   SESSION_RECORDING_ENABLED: "false"
   OBJECT_STORAGE_ENABLED: "false"
 
@@ -85,6 +88,31 @@ services:
       - /var/lib/posthog/kafka:/var/lib/redpanda/data
     networks: [internal]
 
+  # Django connects to Temporal on startup through the Rust SDK bridge, and a
+  # failure there stops the web process binding at all -- not a degraded
+  # feature, no listener. Persistence lives in the Postgres already here;
+  # Elasticsearch is upstream's visibility store and is not required.
+  temporal:
+    image: temporalio/auto-setup:1.26.2
+    restart: unless-stopped
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: posthog
+      POSTGRES_PWD: "{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') }}"
+      POSTGRES_SEEDS: db
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      ENABLE_ES: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z $$(hostname) 7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    depends_on:
+      db: {condition: service_healthy}
+    networks: [internal]
+
   clickhouse:
     image: clickhouse/clickhouse-server:26.6.2.158
     restart: unless-stopped
@@ -114,6 +142,7 @@ services:
       redis: {condition: service_healthy}
       clickhouse: {condition: service_healthy}
       kafka: {condition: service_healthy}
+      temporal: {condition: service_healthy}
     networks: [internal]
 
   worker:
@@ -126,6 +155,7 @@ services:
       redis: {condition: service_healthy}
       clickhouse: {condition: service_healthy}
       kafka: {condition: service_healthy}
+      temporal: {condition: service_healthy}
     networks: [internal]
 
   # Consumes the ingestion topics into ClickHouse. Without it capture writes to
@@ -140,6 +170,7 @@ services:
       redis: {condition: service_healthy}
       clickhouse: {condition: service_healthy}
       kafka: {condition: service_healthy}
+      temporal: {condition: service_healthy}
     networks: [internal]
 
   caddy:
