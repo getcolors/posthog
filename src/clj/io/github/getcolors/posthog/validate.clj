@@ -65,6 +65,7 @@
                       ;; carries no fallback; the Django signing key in
                       ;; particular must never be a value published here.
                       :posthog-secret-key :posthog-postgres-password
+                      :posthog-oidc-rsa-private-key
                       :posthog-backup-r2-access-key-id
                       :posthog-backup-r2-secret-access-key]
                      (backend-secrets opts))]

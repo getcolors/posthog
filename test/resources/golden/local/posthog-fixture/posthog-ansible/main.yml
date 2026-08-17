@@ -176,9 +176,11 @@
         that:
           - lookup('env', 'COLORS_PAR_POSTHOG_SECRET_KEY') | length > 0
           - lookup('env', 'COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | length > 0
+          - lookup('env', 'COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY') | length > 0
         fail_msg: >-
-          COLORS_PAR_POSTHOG_SECRET_KEY and COLORS_PAR_POSTHOG_POSTGRES_PASSWORD
-          must be set; this stack has no default credentials.
+          COLORS_PAR_POSTHOG_SECRET_KEY, COLORS_PAR_POSTHOG_POSTGRES_PASSWORD and
+          COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY must be set; this stack has no
+          default credentials.
         quiet: true
     - name: Render the compose file with run-time credentials
       ansible.builtin.template:
