@@ -66,6 +66,7 @@
                       ;; particular must never be a value published here.
                       :posthog-secret-key :posthog-postgres-password
                       :posthog-oidc-rsa-private-key
+                      :posthog-encryption-salt-keys
                       :posthog-backup-r2-access-key-id
                       :posthog-backup-r2-secret-access-key]
                      (backend-secrets opts))]

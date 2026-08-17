@@ -38,5 +38,6 @@
                   "COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY"
                   "COLORS_PAR_POSTHOG_SECRET_KEY"
                   "COLORS_PAR_POSTHOG_POSTGRES_PASSWORD"
-                  "COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY"]]
+                  "COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY"
+                  "COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS"]]
       (is (str/includes? errors name)))))

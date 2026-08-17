@@ -24,6 +24,11 @@ x-posthog-environment: &posthog-environment
   # Behind Caddy and Cloudflare, Django cannot see that the request arrived
   # over TLS and redirects every non-exempt path to itself -- /_health/ is
   # exempt, so the site looks fine while /capture/ loops forever.
+  # Both the application and the plugin server encrypt fields with this, so it
+  # has to be one value shared by every process: the plugin server throws
+  # "Encryption keys are not set" at startup and exits without it, and at info
+  # level that appears as an ordinary clean shutdown.
+  ENCRYPTION_SALT_KEYS: "{{ lookup('env','COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS') }}"
   IS_BEHIND_PROXY: "true"
   TRUST_ALL_PROXIES: "true"
   SESSION_RECORDING_ENABLED: "false"

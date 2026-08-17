@@ -261,3 +261,12 @@
   ;; Without a mode it exits cleanly at startup, having consumed nothing.
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? compose "PLUGIN_SERVER_MODE: ingestion-v2-combined"))))
+
+(deftest encryption-keys-are-shared-and-required
+  ;; The plugin server throws "Encryption keys are not set" and exits; below
+  ;; debug level that looks like a clean shutdown, so it must never be optional.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "ENCRYPTION_SALT_KEYS"))
+    ;; In the shared anchor, so application and plugin server agree.
+    (is (< (str/index-of compose "ENCRYPTION_SALT_KEYS") (str/index-of compose "services:")))
+    (is (str/includes? @playbook "COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS"))))
