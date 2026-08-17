@@ -62,9 +62,24 @@
         dest: "{{ item.dest }}"
         mode: "{{ item.mode | default('0644') }}"
       loop:
-        - {src: compose.yml, dest: /opt/posthog/compose.yml}
         - {src: Caddyfile, dest: /opt/posthog/Caddyfile}
         - {src: backup, dest: /usr/local/sbin/posthog-backup, mode: "0700"}
+      notify: Restart PostHog stack
+    - name: Require the application secrets the compose file interpolates
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'COLORS_PAR_POSTHOG_SECRET_KEY') | length > 0
+          - lookup('env', 'COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | length > 0
+        fail_msg: >-
+          COLORS_PAR_POSTHOG_SECRET_KEY and COLORS_PAR_POSTHOG_POSTGRES_PASSWORD
+          must be set; this stack has no default credentials.
+        quiet: true
+    - name: Render the compose file with run-time credentials
+      ansible.builtin.template:
+        src: compose.yml
+        dest: /opt/posthog/compose.yml
+        mode: "0600"
+      no_log: true
       notify: Restart PostHog stack
     - name: Install backup credentials outside generated and tracked files
       ansible.builtin.copy:

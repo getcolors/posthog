@@ -86,7 +86,6 @@
 (defn ansible-data [opts]
   (assoc opts
          :ip (or (:ip opts) "192.0.2.10")
-         :posthog-secret-key (or (:posthog-secret-key opts) "posthog-insecure-secret-key-32-chars-long!")
          :posthog-web-port (or (:posthog-web-port opts) 8000)
          :posthog-backup-access-key "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID') }}"
          :posthog-backup-secret-key "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY') }}"))

@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_USER: posthog
       POSTGRES_DB: posthog
-      POSTGRES_PASSWORD: posthog
+      POSTGRES_PASSWORD: "{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') }}"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U posthog"]
       interval: 5s
@@ -51,8 +51,8 @@ services:
     restart: unless-stopped
     environment:
       SITE_URL: "https://posthog.example.com"
-      SECRET_KEY: "posthog-insecure-secret-key-32-chars-long!"
-      DATABASE_URL: "postgres://posthog:posthog@db:5432/posthog"
+      SECRET_KEY: "{{ lookup('env','COLORS_PAR_POSTHOG_SECRET_KEY') }}"
+      DATABASE_URL: "postgres://posthog:{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | urlencode | replace('/', '%2F') }}@db:5432/posthog"
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
       CLICKHOUSE_HTTP_PORT: 8123
@@ -75,8 +75,8 @@ services:
     restart: unless-stopped
     environment:
       SITE_URL: "https://posthog.example.com"
-      SECRET_KEY: "posthog-insecure-secret-key-32-chars-long!"
-      DATABASE_URL: "postgres://posthog:posthog@db:5432/posthog"
+      SECRET_KEY: "{{ lookup('env','COLORS_PAR_POSTHOG_SECRET_KEY') }}"
+      DATABASE_URL: "postgres://posthog:{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | urlencode | replace('/', '%2F') }}@db:5432/posthog"
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
       CLICKHOUSE_HTTP_PORT: 8123

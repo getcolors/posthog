@@ -36,6 +36,16 @@
     (is (str/includes? compose "--maxmemory-policy noeviction"))
     (is (not (str/includes? compose "POSTHOG_SKIP_MIGRATION_CHECKS")))))
 
+(deftest compose-template-carries-no-default-credential
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")
+        rendered (tools/ansible-data (fixture))]
+    ;; The Django signing key was a constant in this public repository, so a
+    ;; rendered artefact must never be able to carry one again.
+    (is (not (str/includes? compose "insecure-secret-key")))
+    (is (not (re-find #"POSTGRES_PASSWORD: posthog" compose)))
+    (is (nil? (:posthog-secret-key rendered)))
+    (is (str/includes? compose "urlencode | replace('/', '%2F')"))))
+
 (deftest capture-is-judged-by-the-stored-row-not-the-status
   ;; The previous step computed a capture result and never looked at it.
   (is (= :ingested (tools/ingestion-verdict "200" 4 5)))

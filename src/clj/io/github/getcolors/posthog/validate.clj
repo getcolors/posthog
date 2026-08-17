@@ -59,6 +59,10 @@
 
 (defn secret-errors [opts]
   (let [keys (concat [:do-token :cloudflare-api-token
+                      ;; The compose template interpolates these at run time and
+                      ;; carries no fallback; the Django signing key in
+                      ;; particular must never be a value published here.
+                      :posthog-secret-key :posthog-postgres-password
                       :posthog-backup-r2-access-key-id
                       :posthog-backup-r2-secret-access-key]
                      (backend-secrets opts))]
