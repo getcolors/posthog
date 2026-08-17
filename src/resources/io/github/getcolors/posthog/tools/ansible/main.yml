@@ -191,10 +191,24 @@
     # ansible.builtin.copy replaces files by rename, so a changed config leaves
     # the container serving the old content indefinitely -- the host path looks
     # correct while the server disagrees. Recreating re-resolves the mount.
-    - name: Reload ClickHouse when its configuration changed
+    # Ask the server what it actually loaded rather than trusting this run's
+    # change flags: on a converge where the files were already correct, `copy`
+    # reports no change while a container started before them keeps serving the
+    # old config forever. The macro stands in for "has the current config".
+    - name: Check whether ClickHouse loaded the current configuration
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query,
+               "SELECT count() FROM system.macros WHERE macro = 'hostClusterType'"]
+      args: {chdir: /opt/posthog}
+      register: clickhouse_macros
+      changed_when: false
+      failed_when: false
+    - name: Reload ClickHouse when its configuration changed or is stale
       ansible.builtin.command: docker compose up -d --force-recreate clickhouse
       args: {chdir: /opt/posthog}
-      when: clickhouse_clusters_config.changed or clickhouse_keeper_config.changed
+      when: >-
+        clickhouse_clusters_config.changed or clickhouse_keeper_config.changed
+        or (clickhouse_macros.stdout | default('') | trim) != '1'
     - name: Wait for ClickHouse to accept queries
       ansible.builtin.command:
         argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query, "SELECT 1"]

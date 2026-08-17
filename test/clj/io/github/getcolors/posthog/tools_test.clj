@@ -108,6 +108,11 @@
   (is (str/includes? @playbook "--force-recreate clickhouse"))
   (is (str/includes? @playbook "clickhouse_keeper_config.changed"))
   (is (str/includes? @playbook "clickhouse_clusters_config.changed"))
+  ;; Change flags alone are not enough: on a converge where the files were
+  ;; already correct, copy reports no change while the container still serves
+  ;; the config it started with. The reload must key off the server's state.
+  (is (str/includes? @playbook "FROM system.macros WHERE macro = 'hostClusterType'"))
+  (is (str/includes? @playbook "clickhouse_macros.stdout"))
   ;; And the migration must not start before the reloaded server is answering.
   (let [reload (str/index-of @playbook "--force-recreate clickhouse")
         wait (str/index-of @playbook "Wait for ClickHouse to accept queries")
