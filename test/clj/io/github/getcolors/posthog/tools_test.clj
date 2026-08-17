@@ -100,3 +100,16 @@
     ;; match only the latter.
     (is (str/includes? @playbook "<hostClusterRole>data</hostClusterRole>"))
     (is (str/includes? compose "config.d/keeper.xml"))))
+
+(deftest clickhouse-config-changes-reach-the-container
+  ;; Single-file bind mounts bind to the inode, and copy replaces by rename, so
+  ;; without a recreate the server keeps serving the previous config while the
+  ;; host file looks correct.
+  (is (str/includes? @playbook "--force-recreate clickhouse"))
+  (is (str/includes? @playbook "clickhouse_keeper_config.changed"))
+  (is (str/includes? @playbook "clickhouse_clusters_config.changed"))
+  ;; And the migration must not start before the reloaded server is answering.
+  (let [reload (str/index-of @playbook "--force-recreate clickhouse")
+        wait (str/index-of @playbook "Wait for ClickHouse to accept queries")
+        migrate (str/index-of @playbook "manage.py migrate_clickhouse")]
+    (is (< reload wait migrate))))
