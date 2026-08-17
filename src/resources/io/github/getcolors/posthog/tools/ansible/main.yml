@@ -19,6 +19,43 @@
     - ansible.builtin.file: {path: "<{ posthog-clickhouse-data-dir }>", state: directory, mode: "0755"}
     - ansible.builtin.file: {path: "<{ posthog-redis-data-dir }>", state: directory, mode: "0755"}
     - ansible.builtin.file: {path: "<{ posthog-backup-dir }>", state: directory, mode: "0700"}
+    - ansible.builtin.file: {path: /var/lib/posthog/clickhouse-config.d, state: directory, mode: "0755"}
+    - name: Install ClickHouse clusters configuration
+      ansible.builtin.copy:
+        dest: /var/lib/posthog/clickhouse-config.d/clusters.xml
+        mode: "0644"
+        content: |
+          <clickhouse>
+              <remote_servers>
+                  <posthog>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </posthog>
+                  <posthog_migrations>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </posthog_migrations>
+                  <posthog_single_shard>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </posthog_single_shard>
+                  <posthog_writable>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </posthog_writable>
+                  <posthog_primary_replica>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </posthog_primary_replica>
+                  <ai_events>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </ai_events>
+                  <aux>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </aux>
+                  <ops>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </ops>
+                  <sessions>
+                      <shard><replica><host>127.0.0.1</host><port>9000</port></replica></shard>
+                  </sessions>
+              </remote_servers>
+          </clickhouse>
     - name: Install stack configuration
       ansible.builtin.copy:
         src: "{{ item.src }}"
