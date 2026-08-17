@@ -21,6 +21,11 @@ x-posthog-environment: &posthog-environment
   # rendered; indent() lines the PEM up under it.
   OIDC_RSA_PRIVATE_KEY: |
     {{ lookup('env','COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY') | indent(4) }}
+  # Behind Caddy and Cloudflare, Django cannot see that the request arrived
+  # over TLS and redirects every non-exempt path to itself -- /_health/ is
+  # exempt, so the site looks fine while /capture/ loops forever.
+  IS_BEHIND_PROXY: "true"
+  TRUST_ALL_PROXIES: "true"
   SESSION_RECORDING_ENABLED: "false"
   OBJECT_STORAGE_ENABLED: "false"
 

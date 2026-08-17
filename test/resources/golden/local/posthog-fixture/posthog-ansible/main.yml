@@ -284,6 +284,30 @@
       retries: 60
       delay: 5
       until: db_ready.rc == 0
+    - name: Install the schema checkpoint
+      ansible.builtin.copy:
+        src: checkpoint.sql
+        dest: /opt/posthog/checkpoint.sql
+        mode: "0644"
+    - name: Check whether PostgreSQL already holds the application schema
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, psql, -U, posthog, -d, posthog, -tAc,
+               "select count(*) from information_schema.tables where table_schema = 'public'"]
+      args: {chdir: /opt/posthog}
+      register: posthog_schema
+      changed_when: false
+    # Replaying every migration from zero takes over an hour on this hardware.
+    # The checkpoint carries the schema and the django_migrations rows, so the
+    # migrate step below applies only what the image adds on top. It is never
+    # --fake and never runs against a database that already has tables, so a
+    # checkpoint behind the image heals forward and one ahead of it fails loudly
+    # rather than silently.
+    - name: Restore the schema checkpoint into an empty database
+      ansible.builtin.shell: |
+        set -euo pipefail
+        docker compose exec -T db psql -U posthog -d posthog -q -v ON_ERROR_STOP=1 < checkpoint.sql
+      args: {chdir: /opt/posthog, executable: /bin/bash}
+      when: (posthog_schema.stdout | default('0') | trim | int) == 0
     - name: Apply PostgreSQL and ClickHouse migrations
       ansible.builtin.command:
         argv:

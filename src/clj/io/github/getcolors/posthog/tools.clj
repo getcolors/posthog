@@ -98,6 +98,7 @@
      (spec (template "ansible" "compose.yml") (str dir "/compose.yml") data)
      (spec (template "ansible" "Caddyfile") (str dir "/Caddyfile") data)
      (spec (template "ansible" "backup") (str dir "/backup") data)
+     (spec (template "ansible" "checkpoint.sql") (str dir "/checkpoint.sql") data)
      (raw-spec (str dir "/inventory.json") (inventory data))]))
 
 (defn ansible-step [opts]

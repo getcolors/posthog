@@ -186,3 +186,30 @@
   ;; schedule_temporal_workflows, so the server never binds.
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? compose "command: ./bin/docker-server"))))
+
+(def checkpoint
+  (delay (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/checkpoint.sql")))
+
+(deftest checkpoint-carries-schema-and-migration-bookkeeping
+  ;; Without the django_migrations rows a restore would look complete and then
+  ;; replay 0001_initial against existing tables -- the exact failure this
+  ;; deployment hit early on.
+  (is (str/includes? @checkpoint "CREATE TABLE"))
+  (is (str/includes? @checkpoint "COPY public.django_migrations"))
+  ;; Schema only: no other table's rows may ride along.
+  (is (= 1 (count (re-seq #"(?m)^COPY public\." @checkpoint)))))
+
+(deftest checkpoint-restores-only-into-an-empty-database-and-still-migrates
+  (let [restore (str/index-of @playbook "Restore the schema checkpoint")
+        migrate (str/index-of @playbook "manage.py migrate_clickhouse")]
+    (is (< restore migrate))
+    ;; Guarded on the live schema, so it can never land on top of data.
+    (is (str/includes? @playbook "posthog_schema.stdout"))
+    ;; Faking the migration state would make a stale checkpoint permanent
+    ;; instead of self-healing; only the comment may mention it.
+    (is (not (re-find #"manage\.py migrate[^\n]*--fake" @playbook)))))
+
+(deftest django-trusts-the-proxy
+  ;; Otherwise every non-exempt path 301s to itself behind Caddy and Cloudflare.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "IS_BEHIND_PROXY"))))
