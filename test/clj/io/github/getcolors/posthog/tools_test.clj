@@ -171,7 +171,7 @@
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")
         parsed (yaml/parse-string compose)]
     (is (contains? (:services parsed) :web))
-    (is (= 9 (count (:services parsed))))))
+    (is (= 10 (count (:services parsed))))))
 
 (deftest temporal-dynamic-config-exists-in-the-image
   ;; Upstream mounts development-sql.yaml from its checkout; the auto-setup
@@ -234,3 +234,11 @@
   (let [reload (str/index-of @playbook "--force-recreate caddy")
         health (str/index-of @playbook "Wait for the PostHog web service")]
     (is (< reload health))))
+
+(deftest something-consumes-the-ingestion-topic
+  ;; Capture produces to events_plugin_ingestion; ClickHouse's Kafka engine
+  ;; tables read clickhouse_* topics. Without a consumer bridging them the API
+  ;; accepts events that never reach the database.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "  plugins:"))
+    (is (str/includes? compose "PERSONS_DATABASE_URL"))))

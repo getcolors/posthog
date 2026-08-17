@@ -8,7 +8,7 @@
   [:profile :workdir :provider-compute :provider-dns :provider-backend
    :compute-prevent-destroy :posthog-host :posthog-image
    :posthog-postgres-image :posthog-clickhouse-image :posthog-redis-image
-   :posthog-kafka-image :posthog-temporal-image :posthog-capture-image :caddy-image
+   :posthog-kafka-image :posthog-temporal-image :posthog-capture-image :posthog-plugin-server-image :caddy-image
    :posthog-postgres-data-dir :posthog-clickhouse-data-dir :posthog-redis-data-dir
    :posthog-kafka-data-dir
    :posthog-backup-dir :posthog-backup-r2-bucket :posthog-backup-r2-endpoint
@@ -42,7 +42,7 @@
                   (re-matches host-re (str (:posthog-host opts))))
       [":posthog-host must be a fully qualified hostname"])
     (for [k [:posthog-image :posthog-postgres-image :posthog-clickhouse-image
-             :posthog-redis-image :posthog-kafka-image :posthog-temporal-image :posthog-capture-image :caddy-image]
+             :posthog-redis-image :posthog-kafka-image :posthog-temporal-image :posthog-capture-image :posthog-plugin-server-image :caddy-image]
           :let [v (get opts k)]
           :when (and (not (missing? v)) (not (re-matches image-re (str v))))]
       (str k " must carry an explicit image tag"))

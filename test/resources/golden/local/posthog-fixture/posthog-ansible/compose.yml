@@ -198,6 +198,24 @@ services:
       temporal: {condition: service_healthy}
     networks: [internal]
 
+  # Capture writes to events_plugin_ingestion; ClickHouse's Kafka engine tables
+  # read clickhouse_* topics. Nothing bridges the two without this consumer, so
+  # events reach Kafka and stop there -- accepted by the API, absent from the
+  # database. It ships as a separate Node image, not part of posthog/posthog.
+  plugins:
+    image: posthog/posthog-node:latest
+    restart: unless-stopped
+    environment:
+      <<: *posthog-environment
+      PERSONS_DATABASE_URL: "postgres://posthog:{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | urlencode | replace('/', '%2F') }}@db:5432/posthog"
+      CLICKHOUSE_VERIFY: "false"
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    networks: [internal]
+
   caddy:
     image: caddy:2.11.4
     restart: unless-stopped
