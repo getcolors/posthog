@@ -35,3 +35,21 @@
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? compose "--maxmemory-policy noeviction"))
     (is (not (str/includes? compose "POSTHOG_SKIP_MIGRATION_CHECKS")))))
+
+(deftest capture-is-judged-by-the-stored-row-not-the-status
+  ;; The previous step computed a capture result and never looked at it.
+  (is (= :ingested (tools/ingestion-verdict "200" 4 5)))
+  (is (= :dropped (tools/ingestion-verdict "200" 4 4)))
+  (is (= :dropped (tools/ingestion-verdict "202" 4 nil)))
+  (is (= :rejected (tools/ingestion-verdict "401" 4 4)))
+  (is (= :unreachable (tools/ingestion-verdict nil 4 4))))
+
+(deftest backup-must-be-fresh-and-non-empty
+  (let [since (java.time.Instant/parse "2026-08-17T02:30:00Z")
+        entry (fn [size mod-time] {:Size size :ModTime mod-time})]
+    (is (tools/fresh-backup? [(entry 1024 "2026-08-17T02:30:05Z")] since))
+    (is (tools/fresh-backup? [(entry 1024 "2026-08-17T04:30:05+02:00")] since))
+    (is (not (tools/fresh-backup? [(entry 1024 "2026-08-16T02:30:05Z")] since)))
+    (is (not (tools/fresh-backup? [(entry 0 "2026-08-17T02:30:05Z")] since)))
+    (is (not (tools/fresh-backup? [] since)))
+    (is (not (tools/fresh-backup? nil since)))))

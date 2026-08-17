@@ -109,45 +109,145 @@
        :host-key-checking false}
       (ansible-specs opts))))
 
-(defn run-json [args timeout]
-  (let [r (process/run-with-timeout args {} timeout)]
-    (if (zero? (:exit r))
-      [(try (json/parse-string (:out r) true) (catch Exception _ nil)) nil]
-      [nil (str (:err r) (:out r))])))
+;; --- Acceptance --------------------------------------------------------------
+;;
+;; Every claim this step reports must be one it checked. TLS is verified (the
+;; previous check passed `curl -k`, so a broken certificate would have gone
+;; unnoticed), a captured event is read back out of ClickHouse rather than
+;; inferred from a status code, and the backup drill is confirmed by a fresh
+;; object in R2 rather than by systemd reporting that it started something.
+
+(defn http-status [args]
+  (let [r (process/run-with-timeout
+           (into ["curl" "-sS" "-o" "/dev/null" "-w" "%{http_code}"] args) {} 20000)]
+    (when (zero? (:exit r)) (str/trim (:out r)))))
+
+(defn ssh-out [ip command timeout]
+  (let [r (process/run-with-timeout
+           ["ssh" "-o" "StrictHostKeyChecking=no" "-o" "ConnectTimeout=10"
+            (str "root@" ip) command] {} timeout)]
+    (when (zero? (:exit r)) (str/trim (:out r)))))
+
+(defn psql [ip query]
+  (not-empty
+   (str (ssh-out ip (str "cd /opt/posthog && docker compose exec -T db psql -U posthog"
+                         " -d posthog -tAc '" query "'")
+                 30000))))
+
+(defn clickhouse
+  "Resolve the events table from system.tables so the check does not hardcode a
+   database name PostHog's migrations own, then run `query` against it."
+  [ip query]
+  (not-empty
+   (str (ssh-out ip (str "cd /opt/posthog && "
+                         "t=$(docker compose exec -T clickhouse clickhouse-client"
+                         " --query \"SELECT database || '.' || name FROM system.tables"
+                         " WHERE name = 'events' AND database NOT IN ('system')"
+                         " ORDER BY database LIMIT 1\" | tr -d '\\r'); "
+                         "[ -n \"$t\" ] && docker compose exec -T clickhouse clickhouse-client"
+                         " --query \"" query "\"")
+                 30000))))
+
+(defn event-count [ip]
+  (some-> (clickhouse ip "SELECT count() FROM $t") parse-long))
+
+(defn project-api-key [ip]
+  (psql ip "select api_token from posthog_team order by id limit 1"))
 
 (defn wait-health [url attempts]
   (loop [n attempts]
-    (let [r (process/run-with-timeout ["curl" "-fsS" "-k" url] {} 10000)]
+    (let [r (process/run-with-timeout ["curl" "-fsS" (str url "/_health/")] {} 10000)]
       (cond (zero? (:exit r)) true
             (pos? n) (do (Thread/sleep 5000) (recur (dec n)))
             :else false))))
+
+(defn send-event [base api-key]
+  (http-status ["-X" "POST" "-H" "content-type: application/json"
+                "--data" (json/generate-string
+                          {:api_key api-key
+                           :event "colors_acceptance"
+                           :distinct_id "colors-acceptance"
+                           :properties {:source "colors"}})
+                (str base "/capture/")]))
+
+(defn ingestion-verdict [status before after]
+  (cond (nil? status) :unreachable
+        (and (integer? before) (integer? after) (> after before)) :ingested
+        (re-matches #"2\d\d" (str status)) :dropped
+        :else :rejected))
+
+(defn wait-ingested
+  "Capture is asynchronous through the Celery worker, so poll rather than
+   sampling once."
+  [ip baseline attempts]
+  (loop [n attempts]
+    (let [after (event-count ip)]
+      (cond (and (integer? after) (> after baseline)) after
+            (pos? n) (do (Thread/sleep 5000) (recur (dec n)))
+            :else after))))
+
+(def rclone-env
+  (str "RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare "
+       "RCLONE_CONFIG_R2_REGION=auto RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true"))
+
+(defn backup-listing [opts ip]
+  (some-> (ssh-out ip (str "set -a; . /etc/posthog-backup.env; set +a; " rclone-env
+                           " RCLONE_CONFIG_R2_ACCESS_KEY_ID=\"$POSTHOG_BACKUP_R2_ACCESS_KEY_ID\""
+                           " RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=\"$POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY\""
+                           " RCLONE_CONFIG_R2_ENDPOINT=\"" (:posthog-backup-r2-endpoint opts) "\""
+                           " rclone lsjson --files-only r2:" (:posthog-backup-r2-bucket opts)
+                           "/" (:profile opts))
+                   120000)
+          not-empty
+          (json/parse-string true)))
+
+(defn parse-instant [s]
+  (try (.toInstant (java.time.OffsetDateTime/parse (str s))) (catch Exception _ nil)))
+
+(defn fresh-backup? [entries since]
+  (boolean (some (fn [{:keys [Size ModTime]}]
+                   (and (pos? (or Size 0))
+                        (when-let [t (parse-instant ModTime)]
+                          (not (.isBefore t since)))))
+                 entries)))
+
+(defn run-backup [ip]
+  (ssh-out ip "systemctl start posthog-backup.service && systemctl is-active posthog-backup.timer"
+           600000))
 
 (defn acceptance-step [opts]
   (if (not= :create (:green/event opts))
     (assoc opts :green/exit 0)
     (let [base (str "https://" (:posthog-host opts))
-          ip (or (:ip opts) "127.0.0.1")]
+          ip (:ip opts)
+          since (.minusSeconds (java.time.Instant/now) 120)]
       (if-not (wait-health base 60)
-        (assoc opts :green/exit 1 :green/err "HTTPS health check did not become ready")
-        ;; Test synthetic event capture
-        (let [payload (json/generate-string
-                       {:api_key "benchmark_key"
-                        :event "benchmark_capture"
-                        :distinct_id "test-user-posthog"
-                        :properties {:benchmark "posthog" :time (System/currentTimeMillis)}})
-              capture (process/run-with-timeout
-                       ["curl" "-fsS" "-k" "-X" "POST"
-                        "-H" "content-type: application/json"
-                        "--data" payload
-                        (str base "/capture/")] {} 15000)
-              ;; Test backup execution via SSH
-              backup (process/run-with-timeout
-                      ["ssh" "-o" "StrictHostKeyChecking=no" "-o" "ConnectTimeout=10"
-                       (str "root@" ip)
-                       "systemctl start posthog-backup.service && systemctl is-active posthog-backup.timer"]
-                      {} 60000)]
-          (cond
-            (not (zero? (:exit backup)))
-            (assoc opts :green/exit 1 :green/err (str "backup verification failed: " (:err backup) (:out backup)))
-            :else
-            (assoc opts :green/exit 0 :posthog/acceptance {:health :ok :capture :ok :backup :ok})))))))
+        (assoc opts :green/exit 1
+               :green/err "HTTPS health did not become ready with a valid certificate")
+        (let [api-key (project-api-key ip)
+              before (event-count ip)]
+          (if-not (integer? before)
+            (assoc opts :green/exit 1
+                   :green/err "could not read the ClickHouse events table to verify capture")
+            (let [verdict (if-not api-key
+                            :not-configured
+                            (let [status (send-event base api-key)
+                                  after (wait-ingested ip before 12)]
+                              (ingestion-verdict status before after)))]
+              (cond
+                (contains? #{:dropped :rejected :unreachable} verdict)
+                (assoc opts :green/exit 1
+                       :green/err (str "synthetic event was not captured: " (name verdict)))
+
+                (nil? (run-backup ip))
+                (assoc opts :green/exit 1 :green/err "backup unit or timer is not healthy")
+
+                (not (fresh-backup? (backup-listing opts ip) since))
+                (assoc opts :green/exit 1
+                       :green/err (str "no backup object newer than this run under r2:"
+                                       (:posthog-backup-r2-bucket opts) "/" (:profile opts)))
+
+                :else
+                (assoc opts :green/exit 0
+                       :posthog/acceptance {:health :ok :event verdict
+                                            :backup :verified-in-r2})))))))))
