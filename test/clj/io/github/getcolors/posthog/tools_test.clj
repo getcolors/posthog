@@ -224,3 +224,13 @@
     (is (str/includes? caddyfile "reverse_proxy capture:3000"))
     (doseq [path ["/capture" "/e" "/batch" "/i/*"]]
       (is (str/includes? caddyfile path)))))
+
+(deftest caddy-serves-the-current-configuration
+  ;; A single-file bind mount pins the inode, so a rewritten Caddyfile never
+  ;; reaches the running container: ingestion routes existed on disk while
+  ;; Caddy still proxied everything to the application.
+  (is (str/includes? @playbook "--force-recreate caddy"))
+  (is (str/includes? @playbook "sha256sum /etc/caddy/Caddyfile"))
+  (let [reload (str/index-of @playbook "--force-recreate caddy")
+        health (str/index-of @playbook "Wait for the PostHog web service")]
+    (is (< reload health))))

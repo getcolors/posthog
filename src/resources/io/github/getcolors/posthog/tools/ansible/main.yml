@@ -329,6 +329,23 @@
       args: {chdir: /opt/posthog}
       register: app_up
       changed_when: "'Created' in (app_up.stdout + app_up.stderr) or 'Recreated' in (app_up.stdout + app_up.stderr)"
+    # Caddy mounts its Caddyfile as a single file, so the same inode trap as the
+    # ClickHouse configs applies: ansible.builtin.copy replaces the file by
+    # rename and the container keeps serving the config it started with, with
+    # the host file looking correct. Compare what Caddy is actually running.
+    - name: Read the Caddyfile checksum Caddy is serving
+      ansible.builtin.shell: |
+        docker compose exec -T caddy sha256sum /etc/caddy/Caddyfile 2>/dev/null | awk '{print $1}'
+      args: {chdir: /opt/posthog, executable: /bin/bash}
+      register: caddy_running_config
+      changed_when: false
+      failed_when: false
+    - ansible.builtin.stat: {path: /opt/posthog/Caddyfile, checksum_algorithm: sha256}
+      register: caddyfile_desired
+    - name: Reload Caddy when its configuration is stale
+      ansible.builtin.command: docker compose up -d --force-recreate caddy
+      args: {chdir: /opt/posthog}
+      when: (caddy_running_config.stdout | default('') | trim) != caddyfile_desired.stat.checksum
     - name: Wait for the PostHog web service to answer its health endpoint
       ansible.builtin.command:
         argv:
