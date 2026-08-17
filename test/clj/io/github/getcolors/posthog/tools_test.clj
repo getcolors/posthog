@@ -170,3 +170,11 @@
         parsed (yaml/parse-string compose)]
     (is (contains? (:services parsed) :web))
     (is (= 9 (count (:services parsed))))))
+
+(deftest temporal-dynamic-config-exists-in-the-image
+  ;; Upstream mounts development-sql.yaml from its checkout; the auto-setup
+  ;; image ships only docker.yaml, and pointing at a missing file leaves the
+  ;; server refusing connections while schema setup reports success.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml"))
+    (is (not (str/includes? compose "DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml")))))

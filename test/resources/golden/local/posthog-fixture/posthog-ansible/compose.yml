@@ -101,7 +101,9 @@ services:
       POSTGRES_USER: posthog
       POSTGRES_PWD: "{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') }}"
       POSTGRES_SEEDS: db
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      # upstream mounts development-sql.yaml from its own repo; the image itself
+      # only ships docker.yaml, and a missing file stops the server booting.
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
       ENABLE_ES: "false"
     healthcheck:
       test: ["CMD-SHELL", "nc -z $$(hostname) 7233"]
