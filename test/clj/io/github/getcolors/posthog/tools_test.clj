@@ -118,3 +118,11 @@
         wait (str/index-of @playbook "Wait for ClickHouse to accept queries")
         migrate (str/index-of @playbook "manage.py migrate_clickhouse")]
     (is (< reload wait migrate))))
+
+(deftest cluster-hosts-are-reachable-from-every-container
+  ;; system.clusters is read by web and worker, which dial the advertised host;
+  ;; loopback there is the client container, not ClickHouse.
+  (is (not (str/includes? @playbook "<host>127.0.0.1</host><port>9000</port>")))
+  (is (str/includes? @playbook "<host>clickhouse</host><port>9000</port>"))
+  ;; Keeper is embedded in the ClickHouse server, so those stay on loopback.
+  (is (str/includes? @playbook "<host>127.0.0.1</host>\n                      <port>9181</port>")))
