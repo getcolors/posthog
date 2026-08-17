@@ -1,0 +1,104 @@
+services:
+  db:
+    image: <{ posthog-postgres-image }>
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: posthog
+      POSTGRES_DB: posthog
+      POSTGRES_PASSWORD: posthog
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U posthog"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+    volumes:
+      - <{ posthog-postgres-data-dir }>:/var/lib/postgresql/data
+    networks: [internal]
+
+  redis:
+    image: <{ posthog-redis-image }>
+    restart: unless-stopped
+    command: redis-server --maxmemory-policy allkeys-lru --maxmemory 200mb
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - <{ posthog-redis-data-dir }>:/data
+    networks: [internal]
+
+  clickhouse:
+    image: <{ posthog-clickhouse-image }>
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    volumes:
+      - <{ posthog-clickhouse-data-dir }>:/var/lib/clickhouse
+    networks: [internal]
+
+  web:
+    image: <{ posthog-image }>
+    restart: unless-stopped
+    environment:
+      SITE_URL: "https://<{ posthog-host }>"
+      SECRET_KEY: "<{ posthog-secret-key }>"
+      DATABASE_URL: "postgres://posthog:posthog@db:5432/posthog"
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_DATABASE: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      REDIS_URL: "redis://redis:6379/"
+      POSTHOG_SKIP_MIGRATION_CHECKS: "1"
+      SESSION_RECORDING_ENABLED: "false"
+      OBJECT_STORAGE_ENABLED: "false"
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    networks: [internal]
+
+  worker:
+    image: <{ posthog-image }>
+    command: ./bin/docker-worker-celery --with-scheduler
+    restart: unless-stopped
+    environment:
+      SITE_URL: "https://<{ posthog-host }>"
+      SECRET_KEY: "<{ posthog-secret-key }>"
+      DATABASE_URL: "postgres://posthog:posthog@db:5432/posthog"
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_DATABASE: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      REDIS_URL: "redis://redis:6379/"
+      POSTHOG_SKIP_MIGRATION_CHECKS: "1"
+      SESSION_RECORDING_ENABLED: "false"
+      OBJECT_STORAGE_ENABLED: "false"
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    networks: [internal]
+
+  caddy:
+    image: <{ caddy-image }>
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [web]
+    networks: [internal]
+
+networks:
+  internal:
+    internal: false
+volumes:
+  caddy-data:
+  caddy-config:

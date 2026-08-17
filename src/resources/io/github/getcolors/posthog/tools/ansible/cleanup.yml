@@ -1,0 +1,11 @@
+---
+- name: Stop PostHog application services before infrastructure deletion
+  hosts: posthog
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.command: docker compose down
+      args: {chdir: /opt/posthog}
+      register: compose_down
+      changed_when: "'Removed' in (compose_down.stderr + compose_down.stdout)"
+      failed_when: false

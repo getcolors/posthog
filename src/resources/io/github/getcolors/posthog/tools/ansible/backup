@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/posthog
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "<{ posthog-backup-dir }>"
+
+# 1. Logical PostgreSQL backup
+docker compose exec -T db pg_dump -U posthog posthog | gzip > "<{ posthog-backup-dir }>/postgres-$stamp.sql.gz"
+
+# 2. ClickHouse metadata and data snapshot
+docker compose exec -T clickhouse tar -czf - /var/lib/clickhouse/metadata /var/lib/clickhouse/data 2>/dev/null > "<{ posthog-backup-dir }>/clickhouse-$stamp.tar.gz" || tar -czf "<{ posthog-backup-dir }>/clickhouse-$stamp.tar.gz" -C "<{ posthog-clickhouse-data-dir }>" .
+
+# 3. Offsite synchronization to Cloudflare R2
+RCLONE_CONFIG_R2_TYPE=s3 \
+RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
+RCLONE_CONFIG_R2_REGION=auto \
+RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true \
+RCLONE_CONFIG_R2_ACCESS_KEY_ID="$POSTHOG_BACKUP_R2_ACCESS_KEY_ID" \
+RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY" \
+RCLONE_CONFIG_R2_ENDPOINT="<{ posthog-backup-r2-endpoint }>" \
+rclone copyto "<{ posthog-backup-dir }>/postgres-$stamp.sql.gz" \
+  "r2:<{ posthog-backup-r2-bucket }>/<{ profile }>/postgres-$stamp.sql.gz"
+
+RCLONE_CONFIG_R2_TYPE=s3 \
+RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
+RCLONE_CONFIG_R2_REGION=auto \
+RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true \
+RCLONE_CONFIG_R2_ACCESS_KEY_ID="$POSTHOG_BACKUP_R2_ACCESS_KEY_ID" \
+RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY" \
+RCLONE_CONFIG_R2_ENDPOINT="<{ posthog-backup-r2-endpoint }>" \
+rclone copyto "<{ posthog-backup-dir }>/clickhouse-$stamp.tar.gz" \
+  "r2:<{ posthog-backup-r2-bucket }>/<{ profile }>/clickhouse-$stamp.tar.gz"
+
+# 4. Retention cleanup
+find "<{ posthog-backup-dir }>" -type f \( -name 'postgres-*.sql.gz' -o -name 'clickhouse-*.tar.gz' \) -mtime +<{ posthog-backup-retention-days }> -delete
