@@ -29,6 +29,15 @@ x-posthog-environment: &posthog-environment
   # "Encryption keys are not set" at startup and exits without it, and at info
   # level that appears as an ordinary clean shutdown.
   ENCRYPTION_SALT_KEYS: "{{ lookup('env','COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS') }}"
+  # This flag was removed earlier in this package's history, correctly: it was
+  # set while nothing ran migrations at all, so it suppressed the one error that
+  # would have revealed an empty ClickHouse. It returns for the opposite reason.
+  # The playbook now runs migrate and migrate_clickhouse explicitly and fails
+  # the converge if either does, which is a stronger guarantee than the check;
+  # meanwhile the in-container check also runs run_async_migrations --check,
+  # which needs the async-migrations setup this deployment does not run, and
+  # blocks the server from ever binding.
+  POSTHOG_SKIP_MIGRATION_CHECKS: "1"
   IS_BEHIND_PROXY: "true"
   TRUST_ALL_PROXIES: "true"
   SESSION_RECORDING_ENABLED: "false"

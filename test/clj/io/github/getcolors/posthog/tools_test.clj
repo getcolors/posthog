@@ -35,7 +35,10 @@
 (deftest broker-does-not-evict
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? compose "--maxmemory-policy noeviction"))
-    (is (not (str/includes? compose "POSTHOG_SKIP_MIGRATION_CHECKS")))))
+    ;; The guarantee is not the in-container check -- which blocks on
+    ;; run_async_migrations -- but that the playbook migrates explicitly and
+    ;; fails the converge when that fails.
+    (is (str/includes? @playbook "manage.py migrate && python manage.py migrate_clickhouse"))))
 
 (deftest compose-template-carries-no-default-credential
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")
