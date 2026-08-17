@@ -270,3 +270,13 @@
     ;; In the shared anchor, so application and plugin server agree.
     (is (< (str/index-of compose "ENCRYPTION_SALT_KEYS") (str/index-of compose "services:")))
     (is (str/includes? @playbook "COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS"))))
+
+(deftest application-and-plugin-server-images-are-pinned-together
+  ;; They share a Postgres schema. With floating tags the node process queried
+  ;; posthog_person.last_seen_at, a column the application's migrations had
+  ;; never created, and died in its consume loop.
+  (let [fixture (slurp "test/fixtures/colors.yml")
+        app (second (re-find #"posthog-image: posthog/posthog:(\S+)" fixture))
+        node (second (re-find #"posthog-plugin-server-image: posthog/posthog-node:(\S+)" fixture))]
+    (is (= app node))
+    (is (not= "latest" app))))

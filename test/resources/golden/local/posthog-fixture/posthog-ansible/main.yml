@@ -292,7 +292,7 @@
       ansible.builtin.shell: |
         set -euo pipefail
         mkdir -p /var/lib/posthog/share
-        docker run --rm --entrypoint sh posthog/posthog:latest \
+        docker run --rm --entrypoint sh posthog/posthog:82ea6681305bb00ad4ca920e3ba6e8fb39157424 \
           -c 'cat /code/share/GeoLite2-City.mmdb' > /var/lib/posthog/share/GeoLite2-City.mmdb
       args:
         chdir: /opt/posthog

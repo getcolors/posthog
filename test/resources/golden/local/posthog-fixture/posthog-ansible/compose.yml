@@ -178,7 +178,7 @@ services:
   # before serving; migrations are an explicit step here, and that script loops
   # on schedule_temporal_workflows so the server never binds. Serve only.
   web:
-    image: posthog/posthog:latest
+    image: posthog/posthog:82ea6681305bb00ad4ca920e3ba6e8fb39157424
     command: ./bin/docker-server
     restart: unless-stopped
     environment: *posthog-environment
@@ -191,7 +191,7 @@ services:
     networks: [internal]
 
   worker:
-    image: posthog/posthog:latest
+    image: posthog/posthog:82ea6681305bb00ad4ca920e3ba6e8fb39157424
     command: ./bin/docker-worker-celery --with-scheduler
     restart: unless-stopped
     environment: *posthog-environment
@@ -208,7 +208,7 @@ services:
   # events reach Kafka and stop there -- accepted by the API, absent from the
   # database. It ships as a separate Node image, not part of posthog/posthog.
   plugins:
-    image: posthog/posthog-node:latest
+    image: posthog/posthog-node:82ea6681305bb00ad4ca920e3ba6e8fb39157424
     restart: unless-stopped
     environment:
       <<: *posthog-environment

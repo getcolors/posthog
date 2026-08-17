@@ -24,12 +24,15 @@ compute-prevent-destroy: true
 # --- PostHog Stack -----------------------------------------------------------
 
 posthog-host: posthog.example.com
-posthog-image: posthog/posthog:latest
+# The application and plugin server images must come from one commit: they
+# share a Postgres schema, and a floating tag on either side means the node
+# process queries columns the application's migrations never created.
+posthog-image: posthog/posthog:82ea6681305bb00ad4ca920e3ba6e8fb39157424
 
 posthog-postgres-image: postgres:17-alpine
 posthog-clickhouse-image: clickhouse/clickhouse-server:26.6.2.158
 posthog-redis-image: redis:7.2-alpine
-posthog-plugin-server-image: posthog/posthog-node:latest
+posthog-plugin-server-image: posthog/posthog-node:82ea6681305bb00ad4ca920e3ba6e8fb39157424
 posthog-capture-image: ghcr.io/posthog/posthog/capture:master
 posthog-temporal-image: temporalio/auto-setup:1.26.2
 posthog-kafka-image: redpandadata/redpanda:v25.1.9
