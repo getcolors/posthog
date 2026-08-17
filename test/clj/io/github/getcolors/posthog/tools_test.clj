@@ -338,3 +338,11 @@
     ;; All three states, so a converge is idempotent whatever it finds.
     (doseq [state ["bootstrapped" "joined" "rotated"]]
       (is (str/includes? owner (str "OWNER=" state))))))
+
+(deftest a-missing-compute-output-fails-loudly
+  ;; The documentation address belongs to build and dry-run. Merging it into a
+  ;; real converge would point Ansible at TEST-NET instead of failing.
+  (is (= "1.2.3.4" (:ip (tools/resolved-compute {} {:ip "192.0.2.10"} {:ip "1.2.3.4"}))))
+  (is (= 1 (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} nil))))
+  (is (= 1 (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} {}))))
+  (is (nil? (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} {:ip "5.6.7.8"})))))

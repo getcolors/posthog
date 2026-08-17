@@ -45,6 +45,18 @@
          :ssh-sources-hcl (tofu/hcl-list (cidrs opts :digitalocean-ssh-sources))
          :http-sources-hcl (tofu/hcl-list (cidrs opts :digitalocean-http-sources))))
 
+(defn resolved-compute
+  "Refuse to hand 192.0.2.10 to Ansible. That is the documentation address the
+   credential-free build and dry-run paths render with; on a real converge a
+   missing compute output must fail loudly rather than quietly point the whole
+   playbook at TEST-NET."
+  [result fallback outputs]
+  (if (:ip outputs)
+    (merge result fallback outputs)
+    (assoc result :green/exit 1
+           :green/err (str "compute produced no ip output; refusing to converge "
+                           "against the documentation address"))))
+
 (defn infrastructure-step [opts]
   (let [dir (tool-dir opts infrastructure-tool)
         specs [(spec (template "infrastructure" "main.tf") (str dir "/main.tf")
@@ -55,7 +67,7 @@
       (wf/failed? result) result
       (= :build (:green/event opts)) (merge result (fallback-params opts))
       (= :delete (:green/event opts)) result
-      :else (merge result (fallback-params opts) (output-params result)))))
+      :else (resolved-compute result (fallback-params opts) (output-params result)))))
 
 (defn zone-id [zone] (format "${data.cloudflare_zone.zone.id}" zone))
 
