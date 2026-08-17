@@ -1,5 +1,14 @@
 posthog.example.com {
   encode zstd gzip
+  # Access logging is off by default in Caddy, so only errors and TLS events
+  # were recorded and a successful request left no trace anywhere. Ingestion
+  # was undebuggable: there was no request-level evidence that an event ever
+  # reached capture. Logs go to stdout, which is where docker logs reads, and
+  # the compose service bounds them so a busy endpoint cannot fill the disk.
+  log {
+    output stdout
+    format json
+  }
   # Ingestion goes to the capture service; everything else is the application.
   @capture path /capture /capture/* /e /e/* /batch /batch/* /i/* /track /track/* /engage /engage/* /s /s/*
   handle @capture {

@@ -273,6 +273,11 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     depends_on: [web]
+    # Access logs are now on, so bound them: an ingestion endpoint writes a
+    # line per request and the default json-file driver never rotates.
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
     networks: [internal]
 
 networks:

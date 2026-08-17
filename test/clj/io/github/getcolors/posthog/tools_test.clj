@@ -355,3 +355,19 @@
   (is (= 1 (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} nil))))
   (is (= 1 (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} {}))))
   (is (nil? (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} {:ip "5.6.7.8"})))))
+
+(def caddyfile
+  (delay (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/Caddyfile")))
+
+(def compose
+  (delay (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")))
+
+(deftest caddy-access-logging-is-on-and-bounded
+  ;; Access logging is off by default in Caddy, so a successful request left no
+  ;; trace and capture had no request-level evidence to debug from.
+  (is (str/includes? @caddyfile "log {"))
+  (is (str/includes? @caddyfile "output stdout"))
+  ;; On, but bounded: json-file never rotates on its own and this endpoint
+  ;; writes a line per request.
+  (is (str/includes? @compose "max-size"))
+  (is (str/includes? @compose "max-file")))
