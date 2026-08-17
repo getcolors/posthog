@@ -93,4 +93,10 @@
     ;; Replicated table paths substitute these; without them the DDL is invalid.
     (is (str/includes? @playbook "<shard>"))
     (is (str/includes? @playbook "<replica>"))
+    ;; cluster.py selects hosts with getMacro on both of these; without them
+    ;; migrate_clickhouse dies with "No macro hostClusterType in config".
+    (is (str/includes? @playbook "<hostClusterType>online</hostClusterType>"))
+    ;; "data" matches callers requesting DATA and the ALL wildcard; "all" would
+    ;; match only the latter.
+    (is (str/includes? @playbook "<hostClusterRole>data</hostClusterRole>"))
     (is (str/includes? compose "config.d/keeper.xml"))))

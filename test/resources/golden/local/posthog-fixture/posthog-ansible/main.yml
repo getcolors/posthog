@@ -95,9 +95,25 @@
                       <port>9181</port>
                   </node>
               </zookeeper>
+              <!--
+                  posthog/clickhouse/cluster.py selects hosts with
+                  `getMacro('hostClusterType')` and `getMacro('hostClusterRole')`
+                  and filters them as
+
+                      (role in requested_roles or ALL in requested_roles)
+                      and (type == workload or workload == DEFAULT)
+
+                  so ALL is a wildcard on the requesting side, not the host
+                  side: a node labelled "all" matches only callers that pass
+                  ALL, while "data" matches both DATA and ALL. Upstream ships
+                  these macros from its own deployment tooling rather than its
+                  config.xml, so a single node has to declare them itself.
+              -->
               <macros>
                   <shard>1</shard>
                   <replica>replica-1</replica>
+                  <hostClusterType>online</hostClusterType>
+                  <hostClusterRole>data</hostClusterRole>
               </macros>
           </clickhouse>
     - name: Install stack configuration
