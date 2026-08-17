@@ -317,3 +317,13 @@
     (is (str/includes? @playbook "--complete-noop-migrations"))
     ;; Backfills are only completed where there is nothing to backfill.
     (is (str/includes? @playbook "posthog_event_count.stdout"))))
+
+(deftest background-jobs-verdict-distinguishes-the-failures
+  ;; The ingestion path never touches Celery, so this is the only part of
+  ;; acceptance that can notice a worker that never started.
+  (is (= :ok (tools/background-verdict "celery=True pending=0")))
+  ;; A pending async migration is exactly what stopped the worker booting.
+  (is (= :migrations-pending (tools/background-verdict "celery=True pending=4")))
+  (is (= :celery-down (tools/background-verdict "celery=False pending=0")))
+  (is (= :unreachable (tools/background-verdict "")))
+  (is (= :unreachable (tools/background-verdict nil))))

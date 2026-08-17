@@ -215,6 +215,27 @@
   (ssh-out ip "systemctl start posthog-backup.service && systemctl is-active posthog-backup.timer"
            600000))
 
+(defn background-jobs
+  "PostHog's own answers, not ours: whether Celery is alive, and whether any
+   async migration is still pending. A pending one stops the worker starting at
+   all, and the ingestion path this step already exercises never touches Celery
+   -- so background jobs can be entirely dead while capture works."
+  [ip]
+  (ssh-out ip (str "cd /opt/posthog && docker compose exec -T web python manage.py shell -c "
+                   "\"from posthog.utils import is_celery_alive; "
+                   "from posthog.models.async_migration import AsyncMigration; "
+                   "print('celery=%s pending=%d' % (is_celery_alive(), "
+                   "AsyncMigration.objects.exclude(status=2).count()))\"")
+           120000))
+
+(defn background-verdict [out]
+  (let [s (str out)]
+    (cond
+      (str/blank? s) :unreachable
+      (not (re-find #"celery=True" s)) :celery-down
+      (not (re-find #"pending=0\b" s)) :migrations-pending
+      :else :ok)))
+
 (defn acceptance-step [opts]
   (if (not= :create (:green/event opts))
     (assoc opts :green/exit 0)
@@ -233,11 +254,16 @@
                             :not-configured
                             (let [status (send-event base api-key)
                                   after (wait-ingested ip before 12)]
-                              (ingestion-verdict status before after)))]
+                              (ingestion-verdict status before after)))
+                  background (background-verdict (background-jobs ip))]
               (cond
                 (contains? #{:dropped :rejected :unreachable} verdict)
                 (assoc opts :green/exit 1
                        :green/err (str "synthetic event was not captured: " (name verdict)))
+
+                (not= :ok background)
+                (assoc opts :green/exit 1
+                       :green/err (str "background jobs are not healthy: " (name background)))
 
                 (nil? (run-backup ip))
                 (assoc opts :green/exit 1 :green/err "backup unit or timer is not healthy")
@@ -250,4 +276,5 @@
                 :else
                 (assoc opts :green/exit 0
                        :posthog/acceptance {:health :ok :event verdict
+                                            :background :ok
                                             :backup :verified-in-r2})))))))))
