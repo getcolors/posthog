@@ -50,7 +50,7 @@
 ;; cannot resolve its own library says so rather than inventing a SHA or
 ;; silently falling back to whatever is lying around. `bb pin` refuses to stamp
 ;; a dirty or unpushed HEAD for the same reason.
-(def ^:private posthog-sha "553578ea93a2a1497c218c2d8196839821bb787a")
+(def ^:private posthog-sha "bf4af0948efeb3e6690a0b924ba64cd380f6b023")
 
 (def ^:private posthog-git-url "https://github.com/getcolors/posthog.git")
 (def ^:private green-git-url "https://github.com/getcolors/green.git")
