@@ -256,3 +256,8 @@
     (doseq [v ["CDP_REDIS_HOST" "LOGS_REDIS_HOST" "INGESTION_REDIS_HOST"
                "POSTHOG_REDIS_HOST" "COOKIELESS_REDIS_HOST"]]
       (is (str/includes? compose (str v ": redis"))))))
+
+(deftest plugin-server-runs-an-ingestion-mode
+  ;; Without a mode it exits cleanly at startup, having consumed nothing.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "PLUGIN_SERVER_MODE: ingestion-v2-combined"))))

@@ -209,6 +209,11 @@ services:
       <<: *posthog-environment
       PERSONS_DATABASE_URL: "postgres://posthog:{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | urlencode | replace('/', '%2F') }}@db:5432/posthog"
       CLICKHOUSE_VERIFY: "false"
+      # With no mode the process starts, finds no capabilities to run, and exits
+      # cleanly -- which reads as a healthy shutdown rather than a failure.
+      # This is the mode that consumes events_plugin_ingestion and produces the
+      # clickhouse_events_json topic ClickHouse is already subscribed to.
+      PLUGIN_SERVER_MODE: ingestion-v2-combined
       # The plugin server opens several independent Redis clients, and only the
       # first reads REDIS_URL; the rest default to 127.0.0.1 and take the whole
       # process down with them when they cannot connect. Upstream runs more than
