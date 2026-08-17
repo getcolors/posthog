@@ -171,7 +171,7 @@
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")
         parsed (yaml/parse-string compose)]
     (is (contains? (:services parsed) :web))
-    (is (= 8 (count (:services parsed))))))
+    (is (= 9 (count (:services parsed))))))
 
 (deftest temporal-dynamic-config-exists-in-the-image
   ;; Upstream mounts development-sql.yaml from its checkout; the auto-setup
@@ -213,3 +213,14 @@
   ;; Otherwise every non-exempt path 301s to itself behind Caddy and Cloudflare.
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? compose "IS_BEHIND_PROXY"))))
+
+(deftest ingestion-paths-reach-the-capture-service
+  ;; Django resolves /capture/, /e/ and /i/v0/e/ to its catch-all frontend view,
+  ;; which answers 403 via CSRF -- proxying them to the app can never ingest.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")
+        caddyfile (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/Caddyfile")]
+    (is (str/includes? compose "  capture:"))
+    (is (str/includes? compose "CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_MAIN"))
+    (is (str/includes? caddyfile "reverse_proxy capture:3000"))
+    (doseq [path ["/capture" "/e" "/batch" "/i/*"]]
+      (is (str/includes? caddyfile path)))))

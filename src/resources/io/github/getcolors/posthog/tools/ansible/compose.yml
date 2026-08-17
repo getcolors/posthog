@@ -120,6 +120,35 @@ services:
       db: {condition: service_healthy}
     networks: [internal]
 
+  # Event ingestion is not part of the Django application: /capture/, /e/ and
+  # /i/v0/e/ all resolve to its catch-all frontend view, which rejects them with
+  # a CSRF 403. Capture is a separate Rust service that writes to Kafka, and
+  # without it the stack can serve a dashboard but cannot receive an event.
+  capture:
+    image: <{ posthog-capture-image }>
+    restart: unless-stopped
+    environment:
+      ADDRESS: "0.0.0.0:3000"
+      CAPTURE_MODE: events
+      RUST_LOG: "info,rdkafka=warn"
+      KAFKA_HOSTS: "kafka:9092"
+      KAFKA_TOPIC: "events_plugin_ingestion"
+      KAFKA_ERROR_TRACKING_TOPIC: "ingestion-errortracking-main"
+      REDIS_URL: "redis://redis:6379/"
+      CAPTURE_V1_SINKS: "msk"
+      CAPTURE_V1_SINK_MSK_KAFKA_HOSTS: "kafka:9092"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_MAIN: "events_plugin_ingestion"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_HISTORICAL: "events_plugin_ingestion_historical"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_OVERFLOW: "events_plugin_ingestion_overflow"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_DLQ: "events_plugin_ingestion_dlq"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_EXCEPTION: "ingestion-errortracking-main"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_HEATMAP: "heatmaps_ingestion"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_CLIENT_INGESTION_WARNING: "ingestion-clientwarnings-main-1"
+    depends_on:
+      kafka: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [internal]
+
   clickhouse:
     image: <{ posthog-clickhouse-image }>
     restart: unless-stopped

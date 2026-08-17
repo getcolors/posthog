@@ -29,6 +29,7 @@ posthog-image: posthog/posthog:latest
 posthog-postgres-image: postgres:17-alpine
 posthog-clickhouse-image: clickhouse/clickhouse-server:26.6.2.158
 posthog-redis-image: redis:7.2-alpine
+posthog-capture-image: ghcr.io/posthog/posthog/capture:master
 posthog-temporal-image: temporalio/auto-setup:1.26.2
 posthog-kafka-image: redpandadata/redpanda:v25.1.9
 caddy-image: caddy:2.11.4

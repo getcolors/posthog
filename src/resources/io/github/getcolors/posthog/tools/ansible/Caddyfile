@@ -1,6 +1,14 @@
 <{ posthog-host }> {
   encode zstd gzip
-  reverse_proxy web:<{ posthog-web-port }>
+  # Ingestion goes to the capture service; everything else is the application.
+  @capture path /capture /capture/* /e /e/* /batch /batch/* /i/* /track /track/* /engage /engage/* /s /s/*
+  handle @capture {
+    reverse_proxy capture:3000
+  }
+
+  handle {
+    reverse_proxy web:<{ posthog-web-port }>
+  }
   header {
     Strict-Transport-Security "max-age=31536000; includeSubDomains"
     X-Content-Type-Options "nosniff"
