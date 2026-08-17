@@ -44,6 +44,7 @@ services:
     volumes:
       - <{ posthog-clickhouse-data-dir }>:/var/lib/clickhouse
       - /var/lib/posthog/clickhouse-config.d/clusters.xml:/etc/clickhouse-server/config.d/clusters.xml:ro
+      - /var/lib/posthog/clickhouse-config.d/keeper.xml:/etc/clickhouse-server/config.d/keeper.xml:ro
     networks: [internal]
 
   web:

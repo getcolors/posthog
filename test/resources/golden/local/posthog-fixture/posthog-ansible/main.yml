@@ -58,6 +58,48 @@
                   </sessions>
               </remote_servers>
           </clickhouse>
+    # PostHog's migrate_clickhouse passes replicated=True unconditionally, so
+    # every table it creates is a ReplicatedMergeTree and needs coordination
+    # metadata -- without it the very first CREATE TABLE dies with "There is no
+    # Zookeeper configuration in server config". A single node does not need a
+    # separate ZooKeeper for that: ClickHouse Keeper runs embedded in the same
+    # server. The macros supply the {shard}/{replica} substitutions the
+    # replicated table paths are built from.
+    - name: Install embedded ClickHouse Keeper configuration
+      ansible.builtin.copy:
+        dest: /var/lib/posthog/clickhouse-config.d/keeper.xml
+        mode: "0644"
+        content: |
+          <clickhouse>
+              <keeper_server>
+                  <tcp_port>9181</tcp_port>
+                  <server_id>1</server_id>
+                  <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+                  <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+                  <coordination_settings>
+                      <operation_timeout_ms>10000</operation_timeout_ms>
+                      <session_timeout_ms>30000</session_timeout_ms>
+                      <raft_logs_level>warning</raft_logs_level>
+                  </coordination_settings>
+                  <raft_configuration>
+                      <server>
+                          <id>1</id>
+                          <hostname>127.0.0.1</hostname>
+                          <port>9234</port>
+                      </server>
+                  </raft_configuration>
+              </keeper_server>
+              <zookeeper>
+                  <node>
+                      <host>127.0.0.1</host>
+                      <port>9181</port>
+                  </node>
+              </zookeeper>
+              <macros>
+                  <shard>1</shard>
+                  <replica>replica-1</replica>
+              </macros>
+          </clickhouse>
     - name: Install stack configuration
       ansible.builtin.copy:
         src: "{{ item.src }}"

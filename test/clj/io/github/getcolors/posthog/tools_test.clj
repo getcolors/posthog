@@ -82,3 +82,15 @@
     (is (< start migrate app))
     ;; A handler flush must not be able to start the stack ahead of migrations.
     (is (not (str/includes? @playbook "Restart PostHog stack")))))
+
+(deftest clickhouse-has-coordination-for-replicated-tables
+  ;; migrate_clickhouse passes replicated=True unconditionally, so every table
+  ;; is a ReplicatedMergeTree and the first CREATE dies with "There is no
+  ;; Zookeeper configuration in server config" unless Keeper is configured.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? @playbook "<keeper_server>"))
+    (is (str/includes? @playbook "<zookeeper>"))
+    ;; Replicated table paths substitute these; without them the DDL is invalid.
+    (is (str/includes? @playbook "<shard>"))
+    (is (str/includes? @playbook "<replica>"))
+    (is (str/includes? compose "config.d/keeper.xml"))))
