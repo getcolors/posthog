@@ -209,6 +209,11 @@ services:
       <<: *posthog-environment
       PERSONS_DATABASE_URL: "postgres://posthog:{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | urlencode | replace('/', '%2F') }}@db:5432/posthog"
       CLICKHOUSE_VERIFY: "false"
+    volumes:
+      # Resolved relative to the process, so mount it everywhere it may look.
+      - /var/lib/posthog/share/GeoLite2-City.mmdb:/share/GeoLite2-City.mmdb:ro
+      - /var/lib/posthog/share/GeoLite2-City.mmdb:/code/share/GeoLite2-City.mmdb:ro
+      - /var/lib/posthog/share/GeoLite2-City.mmdb:/code/nodejs/share/GeoLite2-City.mmdb:ro
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}

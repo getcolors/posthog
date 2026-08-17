@@ -242,3 +242,9 @@
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? compose "  plugins:"))
     (is (str/includes? compose "PERSONS_DATABASE_URL"))))
+
+(deftest plugin-server-gets-a-geoip-database
+  ;; It loads one at startup and exits when it is missing; its image ships none.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? @playbook "GeoLite2-City.mmdb"))
+    (is (str/includes? compose "/share/GeoLite2-City.mmdb:ro"))))

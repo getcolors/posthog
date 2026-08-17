@@ -284,6 +284,19 @@
       retries: 60
       delay: 5
       until: db_ready.rc == 0
+    # The plugin server loads a GeoIP database at startup and dies without it,
+    # but its own image does not ship one -- the application image does. Lift it
+    # across rather than carrying 66MB in this repository.
+    - name: Extract the GeoIP database from the application image
+      ansible.builtin.shell: |
+        set -euo pipefail
+        mkdir -p /var/lib/posthog/share
+        docker run --rm --entrypoint sh posthog/posthog:latest \
+          -c 'cat /code/share/GeoLite2-City.mmdb' > /var/lib/posthog/share/GeoLite2-City.mmdb
+      args:
+        chdir: /opt/posthog
+        executable: /bin/bash
+        creates: /var/lib/posthog/share/GeoLite2-City.mmdb
     - name: Install the schema checkpoint
       ansible.builtin.copy:
         src: checkpoint.sql
