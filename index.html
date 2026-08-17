@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Provision and operate a private single-node PostHog product analytics suite with PostgreSQL 17, ClickHouse 24.8, Redis 7.2, and Caddy on DigitalOcean.">
+  <meta name="description" content="Provision and operate a private single-node PostHog product analytics suite with ClickHouse, Kafka, Temporal, capture and plugin server, Cloudflare HTTPS, and restore-verified R2 backups on one DigitalOcean Droplet.">
   <title>PostHog Package Skill — getcolors</title>
   <style>
-    :root{color-scheme:light;--ink:#1f2328;--muted:#59636e;--line:#d0d7de;--soft:#f6f8fa;--blue:#0969da;--green:#1a7f37;--warn:#9a6700}*{box-sizing:border-box}body{margin:0;color:var(--ink);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:920px;margin:auto;padding:64px 28px 100px}h1{font-size:52px;line-height:1.05;margin:0}h2{margin-top:54px;padding-bottom:8px;border-bottom:1px solid var(--line)}h3{margin-top:30px}.lead{font-size:20px;color:var(--muted);max-width:790px}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{padding:18px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--soft)}:not(pre)>code{padding:.12em .35em;border-radius:5px;background:var(--soft)}a{color:var(--blue)}.eyebrow{color:var(--green);font-weight:700;letter-spacing:.08em}.callout{padding:16px 18px;border-left:4px solid var(--green);background:#dafbe1}.warning{border-color:var(--warn);background:#fff8c5}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{padding:18px;border:1px solid var(--line);border-radius:8px}.card h3{margin-top:0}@media(max-width:650px){main{padding-top:38px}.grid{grid-template-columns:1fr}h1{font-size:40px}}
+    :root{color-scheme:light;--ink:#1f2328;--muted:#59636e;--line:#d0d7de;--soft:#f6f8fa;--blue:#0969da;--green:#1a7f37;--warn:#9a6700}*{box-sizing:border-box}body{margin:0;color:var(--ink);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:920px;margin:auto;padding:64px 28px 100px}h1{font-size:52px;line-height:1.05;margin:0}h2{margin-top:54px;padding-bottom:8px;border-bottom:1px solid var(--line)}h3{margin-top:30px}.lead{font-size:20px;color:var(--muted);max-width:790px}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{padding:18px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--soft)}:not(pre)>code{padding:.12em .35em;border-radius:5px;background:var(--soft)}a{color:var(--blue)}.eyebrow{color:var(--green);font-weight:700;letter-spacing:.08em}.callout{padding:16px 18px;border-left:4px solid var(--green);background:#dafbe1}.warning{border-color:var(--warn);background:#fff8c5}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{padding:18px;border:1px solid var(--line);border-radius:8px}.card h3{margin-top:0}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{padding:9px 12px;border:1px solid var(--line);text-align:left;vertical-align:top;font-size:14.5px}th{background:var(--soft)}@media(max-width:650px){main{padding-top:38px}.grid{grid-template-columns:1fr}h1{font-size:40px}}
   </style>
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-4VKP1WY4QJ"></script>
   <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag('js',new Date());gtag('config','G-4VKP1WY4QJ',{page_title:'PostHog Package Skill — getcolors'});</script>
@@ -14,9 +14,9 @@
 <body><main>
   <p class="eyebrow">GREEN PACKAGE SKILL · DIGITALOCEAN · POSTHOG</p>
   <h1>PostHog Package Skill</h1>
-  <p class="lead">A reproducible Green workflow for one single-node PostHog product analytics suite, backed by PostgreSQL 17, ClickHouse 24.8, Redis 7.2, and Caddy 2.11.4 on DigitalOcean.</p>
+  <p class="lead">A reproducible Green workflow for one single-node PostHog product analytics suite: the Django application and Celery worker, ClickHouse with embedded Keeper, Redpanda, Temporal, the Rust capture service and the Node plugin server, behind Caddy with Cloudflare DNS and TLS.</p>
 
-  <div class="callout"><strong>Private service boundary.</strong> Only HTTPS (80/443) and key-only SSH are open to the internet. Postgres, ClickHouse, Redis, and internal worker communication remain strictly within the private Docker Compose network.</div>
+  <div class="callout"><strong>Ten containers, and none of them are optional.</strong> PostHog’s ingestion path is capture → Kafka → plugin server → ClickHouse, its ClickHouse schema is built from <code>ReplicatedMergeTree</code> tables that require Keeper, and its Django startup connects to Temporal. Upstream’s own single-server compose defines roughly 35 services; this is a deliberate reduction to the set that actually has to be present.</div>
 
   <h2>Quick start</h2>
   <pre><code>npx skills add getcolors/posthog
@@ -24,21 +24,78 @@ cp .agents/skills/package-posthog-green/green ./green
 chmod +x green
 ./green build
 ./green create --dry-run</code></pre>
-  <p>Build renders reproducible output and dry-run walks the workflow without provider side effects. Real creation and deletion require explicit authorization.</p>
+  <p><code>build</code> renders the deployment without credentials. The dry-run walks the whole workflow while skipping every side effect. A real <code>create</code> or <code>delete</code> touches live infrastructure and requires separate authorization.</p>
 
   <h2>Architecture and components</h2>
   <div class="grid">
-    <div class="card"><h3>Infrastructure</h3><p>OpenTofu discovers the configured region’s account default VPC and provisions an Ubuntu 24.04 Droplet and firewall. No VPC UUID is hardcoded.</p></div>
-    <div class="card"><h3>Analytics Engine</h3><p>Ansible converges Docker Compose with PostHog Web UI and Celery worker, PostgreSQL 17 for relational metadata, ClickHouse 24.8 for columnar events, and Redis 7.2 for cache/queue.</p></div>
-    <div class="card"><h3>Ingress &amp; TLS</h3><p>Cloudflare manages DNS and Caddy terminates origin TLS, reverse-proxying traffic to PostHog web on port 8000.</p></div>
-    <div class="card"><h3>Disaster Recovery</h3><p>Scheduled systemd timer <code>posthog-backup.timer</code> triggers <code>/usr/local/sbin/posthog-backup</code> to snapshot PostgreSQL and ClickHouse to Cloudflare R2.</p></div>
+    <div class="card"><h3>Compute</h3><p>OpenTofu discovers the configured region’s default VPC at plan time and creates one Ubuntu 24.04 Droplet plus a firewall. No VPC is created and no VPC UUID belongs in desired state.</p></div>
+    <div class="card"><h3>Public boundary</h3><p>Cloudflare publishes one proxied A record. Caddy sends <code>/capture</code>, <code>/e</code>, <code>/batch</code>, <code>/i/*</code>, <code>/track</code>, <code>/engage</code> and <code>/s</code> to the capture service, and everything else to the application.</p></div>
+    <div class="card"><h3>Sizing</h3><p><code>s-8vcpu-16gb</code>. This is not the same shape as the other analytics packages: 8 GiB wedged the machine hard enough that <code>sshd</code> could not fork, and upstream’s own hobby minimum is 16 GiB.</p></div>
+    <div class="card"><h3>Reproducibility</h3><p>The application and plugin server images are pinned to <strong>one commit</strong>. They share a Postgres schema, and floating tags on either side let the node process query columns the application’s migrations never created.</p></div>
   </div>
+  <table>
+    <tr><th>Service</th><th>Image</th><th>Role</th></tr>
+    <tr><td><code>web</code></td><td><code>posthog/posthog</code> @ <code>82ea668</code></td><td>Django application, served by NGINX Unit</td></tr>
+    <tr><td><code>worker</code></td><td>same commit</td><td>Celery worker and scheduler</td></tr>
+    <tr><td><code>plugins</code></td><td><code>posthog/posthog-node</code> @ <code>82ea668</code></td><td>Consumes the ingestion topic into ClickHouse</td></tr>
+    <tr><td><code>capture</code></td><td><code>ghcr.io/posthog/posthog/capture</code></td><td>Rust event capture; writes to Kafka</td></tr>
+    <tr><td><code>kafka</code></td><td><code>redpandadata/redpanda:v25.1.9</code></td><td>Event bus, as upstream uses</td></tr>
+    <tr><td><code>clickhouse</code></td><td><code>clickhouse-server:26.6.2.158</code></td><td>Columnar store, with embedded Keeper</td></tr>
+    <tr><td><code>temporal</code></td><td><code>temporalio/auto-setup:1.26.2</code></td><td>Workflow engine, persisted in the same Postgres</td></tr>
+    <tr><td><code>db</code></td><td><code>postgres:17-alpine</code></td><td>Relational store for PostHog and Temporal</td></tr>
+    <tr><td><code>redis</code></td><td><code>redis:7.2-alpine</code></td><td>Celery broker, configured <code>noeviction</code></td></tr>
+    <tr><td><code>caddy</code></td><td><code>caddy:2.11.4</code></td><td>TLS termination and ingestion routing</td></tr>
+  </table>
+  <p>Redis is the broker, not a cache: upstream’s hobby compose caps it at 200 MB with <code>allkeys-lru</code>, which silently discards queued ingestion tasks under pressure. Here it refuses to evict. ClickHouse runs Keeper embedded rather than as a separate ZooKeeper, which is what makes <code>ReplicatedMergeTree</code> possible on one node.</p>
 
-  <h2>Desired state and lifecycle</h2>
-  <p>Non-secret configuration lives in <code>colors.yml</code>. Credentials are provided at runtime via <code>COLORS_PAR_*</code> environment variables.</p>
-  <pre><code>./green build
-./green create --dry-run
-./green create
-./green delete</code></pre>
+  <h2>Desired state and credentials</h2>
+  <p><code>colors.yml</code> is the only file you edit, and it holds non-secret values only: the profile, DigitalOcean region, size and SSH sources, the host, every image tag, the data directories, and the backup destination, schedule and retention. See the <a href="skills/package-posthog-green/references/configuration.md">configuration reference</a> for every key.</p>
+  <table>
+    <tr><th>Variable</th><th>Purpose</th></tr>
+    <tr><td><code>COLORS_PAR_DO_TOKEN</code></td><td>DigitalOcean compute and firewall</td></tr>
+    <tr><td><code>COLORS_PAR_CLOUDFLARE_API_TOKEN</code></td><td>DNS record for the configured host</td></tr>
+    <tr><td><code>COLORS_PAR_POSTHOG_SECRET_KEY</code></td><td>Django signing key; signs sessions and password-reset tokens</td></tr>
+    <tr><td><code>COLORS_PAR_POSTHOG_POSTGRES_PASSWORD</code></td><td>PostgreSQL password, percent-encoded into <code>DATABASE_URL</code></td></tr>
+    <tr><td><code>COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY</code></td><td>RSA key for OAuth setup; the application exits at startup without it</td></tr>
+    <tr><td><code>COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS</code></td><td>Encrypts stored fields; shared by the application and plugin server</td></tr>
+    <tr><td><code>COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID</code><br><code>COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY</code></td><td>R2 credentials for the backup bucket</td></tr>
+  </table>
+  <p>Generate the last two with <code>openssl genrsa 2048</code> and <code>openssl rand -hex 16</code>. Every one of these is required for a real <code>create</code>: the run fails before contacting a provider rather than starting a stack that serves a UI and silently ingests nothing.</p>
+  <ul>
+    <li>Never export <code>COLORS_PAR_PROFILE</code>. The profile keys remote state.</li>
+    <li>Never edit or commit generated <code>.colors/</code> output.</li>
+    <li>Keep <code>compute-prevent-destroy: true</code> in committed desired state.</li>
+  </ul>
+
+  <h2>Migrations and the schema checkpoint</h2>
+  <p>Applying PostHog’s Django migrations from zero takes <strong>over an hour</strong>, CPU-bound and single-threaded. The package therefore commits <code>checkpoint.sql</code>: the schema plus the <code>django_migrations</code> rows, in plain SQL, stamped with the commit it was taken from.</p>
+  <p>It is restored <strong>only</strong> into a database with no tables, and <strong>only</strong> when its stamped commit matches the commit the application image reports. The ordinary <code>migrate</code> then runs regardless, so a checkpoint behind the image applies the delta and heals forward. It is never faked. A checkpoint from a divergent commit is skipped rather than planting migrations the image has never heard of, because PostHog’s migrate command stops on orphaned migrations and prompts for input no converge can answer.</p>
+  <p>Migrations run with the application stopped: the image’s entrypoint migrates on startup, so bringing the web container up first puts two runners on one schema.</p>
+
+  <h2>Acceptance and operations</h2>
+  <pre><code>./green create
+ssh &lt;droplet&gt; 'cd /opt/posthog &amp;&amp; docker compose ps'
+ssh &lt;droplet&gt; 'cd /opt/posthog &amp;&amp; docker compose logs --tail=50 plugins'
+ssh &lt;droplet&gt; 'systemctl status posthog-backup.timer'</code></pre>
+  <p>Acceptance runs at the end of <code>create</code> and reports only what it checked:</p>
+  <ul>
+    <li><strong>HTTPS with certificate verification.</strong> <code>/_health/</code> must answer over a valid certificate; the check never disables verification.</li>
+    <li><strong>Capture is read back from ClickHouse.</strong> A synthetic event is posted with the project’s API token and the events table must grow. A 2xx with no stored row is reported as <em>dropped</em> — the case that hides a broken ingestion pipeline behind a healthy-looking API. With no project provisioned the verdict is <em>not-configured</em>, which passes and claims nothing.</li>
+    <li><strong>The backup drill is confirmed in R2.</strong> The unit is started and the profile prefix must then contain a non-empty object newer than the run.</li>
+  </ul>
+  <p>Expect a first converge to take a while: the migration set is large, and NGINX Unit boots four Django workers before <code>/_health/</code> answers. The health gate allows twenty minutes for that.</p>
+
+  <h2>Backups, restoration, and disaster recovery</h2>
+  <p>A systemd timer runs nightly at <code>02:30</code> UTC. Each run takes a compressed <code>pg_dump</code> and a native ClickHouse <code>BACKUP</code> into the server’s allowed path on the bind mount, then uploads both to R2 under the profile prefix. ClickHouse is never captured with a hot <code>tar</code>: that races the server’s merges and yields an archive that cannot be restored.</p>
+  <p>To recover, restore the PostgreSQL dump into an empty PostgreSQL 17 database and the ClickHouse archive with <code>RESTORE</code>, converge a replacement at the same pinned commit, and verify both the UI and event ingestion before moving DNS. Never test restoration over live data.</p>
+
+  <div class="callout warning"><strong>Prevent-destroy is not a backup.</strong> Deleting compute does not authorize deleting R2 objects, the discovered default VPC, unrelated DNS, or any other provider resource. <code>posthog-capture-image</code> also tracks <code>:master</code> rather than a digest — pin it before you depend on reproducing a deployment exactly.</div>
+
+  <h2>Development and source</h2>
+  <pre><code>bb test
+bb golden
+bb golden:accept
+./scripts/launcher.sh</code></pre>
+  <p>The suite asserts the properties that were expensive to learn: that migrations precede the health gate, that the ClickHouse reload is keyed on what the server has actually loaded rather than on this run’s change flags, that the application and plugin server tags are equal, and that the checkpoint is bound to its commit. <a href="https://github.com/getcolors/posthog">Source on GitHub</a>. Read every golden diff — never accept generated output merely to make the suite pass.</p>
 </main></body>
 </html>
