@@ -327,3 +327,14 @@
   (is (= :celery-down (tools/background-verdict "celery=False pending=0")))
   (is (= :unreachable (tools/background-verdict "")))
   (is (= :unreachable (tools/background-verdict nil))))
+
+(deftest an-owner-account-is-provisioned
+  ;; Without one a converge leaves an instance nobody can log into: the hosted
+  ;; realm only lets the first user create an organization, and the acceptance
+  ;; step's project already creates one.
+  (let [owner (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/owner.py")]
+    (is (str/includes? @playbook "owner.py"))
+    (is (str/includes? @playbook "COLORS_PAR_POSTHOG_ADMIN_PASSWORD"))
+    ;; All three states, so a converge is idempotent whatever it finds.
+    (doseq [state ["bootstrapped" "joined" "rotated"]]
+      (is (str/includes? owner (str "OWNER=" state))))))

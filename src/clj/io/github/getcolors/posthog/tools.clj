@@ -99,6 +99,7 @@
      (spec (template "ansible" "Caddyfile") (str dir "/Caddyfile") data)
      (spec (template "ansible" "backup") (str dir "/backup") data)
      (spec (template "ansible" "checkpoint.sql") (str dir "/checkpoint.sql") data)
+     (spec (template "ansible" "owner.py") (str dir "/owner.py") data)
      (raw-spec (str dir "/inventory.json") (inventory data))]))
 
 (defn ansible-step [opts]

@@ -6,7 +6,7 @@
 (def profile-par (green-cli/par-name :profile))
 (def required
   [:profile :workdir :provider-compute :provider-dns :provider-backend
-   :compute-prevent-destroy :posthog-host :posthog-image
+   :compute-prevent-destroy :posthog-host :posthog-admin-email :posthog-image
    :posthog-postgres-image :posthog-clickhouse-image :posthog-redis-image
    :posthog-kafka-image :posthog-temporal-image :posthog-capture-image :posthog-plugin-server-image :caddy-image
    :posthog-postgres-data-dir :posthog-clickhouse-data-dir :posthog-redis-data-dir
@@ -70,6 +70,7 @@
                       :posthog-secret-key :posthog-postgres-password
                       :posthog-oidc-rsa-private-key
                       :posthog-encryption-salt-keys
+                      :posthog-admin-password
                       :posthog-backup-r2-access-key-id
                       :posthog-backup-r2-secret-access-key]
                      (backend-secrets opts))]
