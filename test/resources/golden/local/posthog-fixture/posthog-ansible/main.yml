@@ -303,6 +303,24 @@
         src: checkpoint.sql
         dest: /opt/posthog/checkpoint.sql
         mode: "0644"
+    # A checkpoint only applies to the commit it was taken from. Behind the
+    # image on one lineage it heals forward, because migrate applies the delta;
+    # from a divergent commit it leaves migrations the image has never heard of
+    # and migrate stops on orphaned migrations. Compare commits and migrate from
+    # zero when they differ rather than restoring something that cannot heal.
+    - name: Read the commit the application image was built from
+      ansible.builtin.command:
+        argv: [docker, compose, run, --rm, --no-deps, -T, --entrypoint, cat, web, /code/commit.txt]
+      args: {chdir: /opt/posthog}
+      register: posthog_image_commit
+      changed_when: false
+      failed_when: false
+    - name: Read the commit the checkpoint was taken from
+      ansible.builtin.shell: |
+        sed -n 's/^-- posthog-commit: //p' checkpoint.sql | head -1
+      args: {chdir: /opt/posthog, executable: /bin/bash}
+      register: posthog_checkpoint_commit
+      changed_when: false
     - name: Check whether PostgreSQL already holds the application schema
       ansible.builtin.command:
         argv: [docker, compose, exec, -T, db, psql, -U, posthog, -d, posthog, -tAc,
@@ -321,7 +339,10 @@
         set -euo pipefail
         docker compose exec -T db psql -U posthog -d posthog -q -v ON_ERROR_STOP=1 < checkpoint.sql
       args: {chdir: /opt/posthog, executable: /bin/bash}
-      when: (posthog_schema.stdout | default('0') | trim | int) == 0
+      when:
+        - (posthog_schema.stdout | default('0') | trim | int) == 0
+        - (posthog_checkpoint_commit.stdout | default('') | trim) != ''
+        - (posthog_checkpoint_commit.stdout | trim) == (posthog_image_commit.stdout | default('') | trim)
     - name: Apply PostgreSQL and ClickHouse migrations
       ansible.builtin.command:
         argv:

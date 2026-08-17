@@ -280,3 +280,11 @@
         node (second (re-find #"posthog-plugin-server-image: posthog/posthog-node:(\S+)" fixture))]
     (is (= app node))
     (is (not= "latest" app))))
+
+(deftest checkpoint-is-bound-to-the-commit-it-came-from
+  ;; Behind the image on one lineage a checkpoint heals forward. From a
+  ;; divergent commit it leaves migrations the image never had, and migrate
+  ;; stops on orphaned migrations -- so restore only on an exact match.
+  (is (str/starts-with? @checkpoint "-- posthog-commit: "))
+  (is (str/includes? @playbook "posthog_checkpoint_commit.stdout"))
+  (is (str/includes? @playbook "posthog_image_commit.stdout")))

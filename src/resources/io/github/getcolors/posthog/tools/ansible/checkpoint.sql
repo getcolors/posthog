@@ -1,3 +1,4 @@
+-- posthog-commit: 4d4d5b83a518d71eb37579398d054479388b6670
 --
 -- PostgreSQL database dump
 --
