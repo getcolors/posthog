@@ -248,3 +248,11 @@
   (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
     (is (str/includes? @playbook "GeoLite2-City.mmdb"))
     (is (str/includes? compose "/share/GeoLite2-City.mmdb:ro"))))
+
+(deftest every-plugin-server-redis-client-is-pointed-at-redis
+  ;; Only the first client reads REDIS_URL; the others default to 127.0.0.1 and
+  ;; exit the process when they cannot connect.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (doseq [v ["CDP_REDIS_HOST" "LOGS_REDIS_HOST" "INGESTION_REDIS_HOST"
+               "POSTHOG_REDIS_HOST" "COOKIELESS_REDIS_HOST"]]
+      (is (str/includes? compose (str v ": redis"))))))

@@ -209,6 +209,26 @@ services:
       <<: *posthog-environment
       PERSONS_DATABASE_URL: "postgres://posthog:{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | urlencode | replace('/', '%2F') }}@db:5432/posthog"
       CLICKHOUSE_VERIFY: "false"
+      # The plugin server opens several independent Redis clients, and only the
+      # first reads REDIS_URL; the rest default to 127.0.0.1 and take the whole
+      # process down with them when they cannot connect. Upstream runs more than
+      # one Redis, so each has its own host setting -- here they are all the one
+      # Redis this stack has.
+      POSTHOG_REDIS_HOST: redis
+      POSTHOG_REDIS_PORT: "6379"
+      INGESTION_REDIS_HOST: redis
+      INGESTION_REDIS_PORT: "6379"
+      CDP_REDIS_HOST: redis
+      CDP_REDIS_PORT: "6379"
+      LOGS_REDIS_HOST: redis
+      LOGS_REDIS_PORT: "6379"
+      COOKIELESS_REDIS_HOST: redis
+      COOKIELESS_REDIS_PORT: "6379"
+      CAPTURE_CONFIG_REDIS_HOST: redis
+      POSTHOG_SESSION_RECORDING_REDIS_HOST: redis
+      POSTHOG_SESSION_RECORDING_REDIS_PORT: "6379"
+      SESSION_RECORDING_API_REDIS_HOST: redis
+      SESSION_RECORDING_API_REDIS_PORT: "6379"
     volumes:
       # Resolved relative to the process, so mount it everywhere it may look.
       - /var/lib/posthog/share/GeoLite2-City.mmdb:/share/GeoLite2-City.mmdb:ro
