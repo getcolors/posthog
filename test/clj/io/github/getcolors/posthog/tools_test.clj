@@ -141,3 +141,10 @@
     (doseq [collection ["msk_cluster" "warpstream_ingestion" "warpstream_calculated_events"
                         "warpstream_replay" "warpstream_shared" "warpstream_cyclotron"]]
       (is (str/includes? @playbook (str "<" collection ">"))))))
+
+(deftest system-log-tables-exist-before-migrations
+  ;; system.crash_log is created on first write, and a migration reads it.
+  (let [flush (str/index-of @playbook "SYSTEM FLUSH LOGS")
+        migrate (str/index-of @playbook "manage.py migrate_clickhouse")]
+    (is (some? flush))
+    (is (< flush migrate))))

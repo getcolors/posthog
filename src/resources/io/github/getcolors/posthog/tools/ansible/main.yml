@@ -258,6 +258,15 @@
       retries: 60
       delay: 5
       until: clickhouse_ready.rc == 0
+    # System log tables are created on first write, so a freshly started server
+    # has no system.crash_log -- and a PostHog migration builds a metrics view
+    # over it, failing with "Unknown table expression identifier". Flushing the
+    # logs materialises them before the migrations run.
+    - name: Materialise the ClickHouse system log tables
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query, "SYSTEM FLUSH LOGS"]
+      args: {chdir: /opt/posthog}
+      changed_when: false
     - name: Wait for PostgreSQL to accept connections
       ansible.builtin.command:
         argv: [docker, compose, exec, -T, db, pg_isready, -U, posthog]
