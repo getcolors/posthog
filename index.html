@@ -89,7 +89,7 @@ ssh &lt;droplet&gt; 'systemctl status posthog-backup.timer'</code></pre>
   <p>A systemd timer runs nightly at <code>02:30</code> UTC. Each run takes a compressed <code>pg_dump</code> and a native ClickHouse <code>BACKUP</code> into the server’s allowed path on the bind mount, then uploads both to R2 under the profile prefix. ClickHouse is never captured with a hot <code>tar</code>: that races the server’s merges and yields an archive that cannot be restored.</p>
   <p>To recover, restore the PostgreSQL dump into an empty PostgreSQL 17 database and the ClickHouse archive with <code>RESTORE</code>, converge a replacement at the same pinned commit, and verify both the UI and event ingestion before moving DNS. Never test restoration over live data.</p>
 
-  <div class="callout warning"><strong>Prevent-destroy is not a backup.</strong> Deleting compute does not authorize deleting R2 objects, the discovered default VPC, unrelated DNS, or any other provider resource. <code>posthog-capture-image</code> also tracks <code>:master</code> rather than a digest — pin it before you depend on reproducing a deployment exactly.</div>
+  <div class="callout warning"><strong>Prevent-destroy is not a backup.</strong> Deleting compute does not authorize deleting R2 objects, the discovered default VPC, unrelated DNS, or any other provider resource. Every image is pinned: the application and plugin server to one commit, capture by digest, and the datastores to explicit versions.</div>
 
   <h2>Development and source</h2>
   <pre><code>bb test
