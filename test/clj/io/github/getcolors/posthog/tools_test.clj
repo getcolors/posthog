@@ -71,3 +71,14 @@
     (is (str/includes? backup "BACKUP DATABASE"))
     (is (str/includes? backup "/var/lib/clickhouse/backups/"))
     (is (not (str/includes? backup "tar -czf")))))
+
+(deftest datastores-start-before-migrations-and-app-after
+  ;; Bringing `web` up first put the image's own startup migration in a race
+  ;; with the explicit one, and the loser died on "relation already exists".
+  (let [start (str/index-of @playbook "docker compose up -d db redis clickhouse")
+        migrate (str/index-of @playbook "manage.py migrate_clickhouse")
+        app (str/index-of @playbook "Converge the application containers")]
+    (is (and start migrate app))
+    (is (< start migrate app))
+    ;; A handler flush must not be able to start the stack ahead of migrations.
+    (is (not (str/includes? @playbook "Restart PostHog stack")))))

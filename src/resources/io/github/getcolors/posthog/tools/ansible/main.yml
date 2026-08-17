@@ -66,7 +66,6 @@
       loop:
         - {src: Caddyfile, dest: /opt/posthog/Caddyfile}
         - {src: backup, dest: /usr/local/sbin/posthog-backup, mode: "0700"}
-      notify: Restart PostHog stack
     - name: Require the application secrets the compose file interpolates
       ansible.builtin.assert:
         that:
@@ -82,7 +81,6 @@
         dest: /opt/posthog/compose.yml
         mode: "0600"
       no_log: true
-      notify: Restart PostHog stack
     - name: Install backup credentials outside generated and tracked files
       ansible.builtin.copy:
         dest: /etc/posthog-backup.env
@@ -120,11 +118,14 @@
           WantedBy=timers.target
       notify: Reload systemd
     - ansible.builtin.meta: flush_handlers
-    - name: Build and converge pinned containers
-      ansible.builtin.command: docker compose up -d --remove-orphans
+    # Start the datastores alone. The application image migrates on startup, so
+    # bringing `web` up before the explicit migration below puts two runners on
+    # one schema and the loser dies on "relation already exists".
+    - name: Start the datastores
+      ansible.builtin.command: docker compose up -d db redis clickhouse
       args: {chdir: /opt/posthog}
       register: compose_up
-      changed_when: "'Built' in (compose_up.stdout + compose_up.stderr) or 'Created' in (compose_up.stdout + compose_up.stderr) or 'Recreated' in (compose_up.stdout + compose_up.stderr)"
+      changed_when: "'Created' in (compose_up.stdout + compose_up.stderr) or 'Recreated' in (compose_up.stdout + compose_up.stderr)"
     - ansible.builtin.systemd_service: {name: posthog-backup.timer, enabled: true, state: started}
     - name: Wait for PostgreSQL to accept connections
       ansible.builtin.command:
@@ -151,6 +152,11 @@
       args: {chdir: /opt/posthog}
       register: migrations
       changed_when: "'No migrations to apply' not in (migrations.stdout + migrations.stderr)"
+    - name: Converge the application containers
+      ansible.builtin.command: docker compose up -d --remove-orphans
+      args: {chdir: /opt/posthog}
+      register: app_up
+      changed_when: "'Created' in (app_up.stdout + app_up.stderr) or 'Recreated' in (app_up.stdout + app_up.stderr)"
     - name: Wait for the PostHog web service to answer its health endpoint
       ansible.builtin.command:
         argv:
@@ -177,6 +183,3 @@
   handlers:
     - name: Reload systemd
       ansible.builtin.systemd_service: {daemon_reload: true}
-    - name: Restart PostHog stack
-      ansible.builtin.command: docker compose up -d --remove-orphans
-      args: {chdir: /opt/posthog}
