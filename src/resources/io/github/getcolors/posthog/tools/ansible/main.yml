@@ -359,6 +359,19 @@
       args: {chdir: /opt/posthog}
       register: migrations
       changed_when: "'No migrations to apply' not in (migrations.stdout + migrations.stderr)"
+    # posthog/posthog-node at this commit queries posthog_person.last_seen_at,
+    # and the application's migrations at the same commit do not create it. The
+    # ingestion consumer therefore dies on its first message and events stop in
+    # Kafka -- accepted by the API, absent from the database. This compensates
+    # for that mismatch and is written IF NOT EXISTS, so an image that grows the
+    # column properly is unaffected.
+    - name: Add the person column the plugin server queries
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, psql, -U, posthog, -d, posthog, -q,
+               -v, ON_ERROR_STOP=1, -c,
+               "ALTER TABLE posthog_person ADD COLUMN IF NOT EXISTS last_seen_at timestamptz NULL"]
+      args: {chdir: /opt/posthog}
+      changed_when: false
     - name: Converge the application containers
       ansible.builtin.command: docker compose up -d --remove-orphans
       args: {chdir: /opt/posthog}

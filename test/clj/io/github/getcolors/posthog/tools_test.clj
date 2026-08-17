@@ -291,3 +291,12 @@
   (is (str/starts-with? @checkpoint "-- posthog-commit: "))
   (is (str/includes? @playbook "posthog_checkpoint_commit.stdout"))
   (is (str/includes? @playbook "posthog_image_commit.stdout")))
+
+(deftest person-column-the-plugin-server-needs-is-created
+  ;; The node image queries a column the application's migrations at the same
+  ;; commit do not create; without it ingestion accepts events and stores none.
+  (is (str/includes? @playbook "posthog_person ADD COLUMN IF NOT EXISTS last_seen_at"))
+  (let [alter (str/index-of @playbook "ADD COLUMN IF NOT EXISTS last_seen_at")
+        migrate (str/index-of @playbook "manage.py migrate_clickhouse")]
+    ;; After migrations, so a real migration adding it wins.
+    (is (< migrate alter))))
