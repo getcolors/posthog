@@ -18,7 +18,10 @@
    :r2-bucket :r2-endpoint])
 
 (def host-re #"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$")
-(def image-re #"^[^\s:@]+(?:/[^\s:@]+)*:[^\s:@]+$")
+(def image-re
+  ;; name:tag, name@sha256:..., or name:tag@sha256:... A digest is the only
+  ;; pin that cannot move under the deployment, so validation must accept it.
+  #"^[^\s:@]+(?:/[^\s:@]+)*(?::[^\s:@]+|(?::[^\s:@]+)?@sha256:[0-9a-f]{64})$")
 
 (defn missing? [x] (or (nil? x) (and (string? x) (str/blank? x))))
 

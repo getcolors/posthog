@@ -139,7 +139,7 @@ services:
   # a CSRF 403. Capture is a separate Rust service that writes to Kafka, and
   # without it the stack can serve a dashboard but cannot receive an event.
   capture:
-    image: ghcr.io/posthog/posthog/capture:master
+    image: ghcr.io/posthog/posthog/capture@sha256:8b07f51be1a8983c4d171b443a58c0deb3ab1e6e15202729cde85c3fa280b3e5
     restart: unless-stopped
     environment:
       ADDRESS: "0.0.0.0:3000"

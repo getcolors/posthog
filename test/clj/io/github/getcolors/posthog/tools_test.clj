@@ -300,3 +300,10 @@
         migrate (str/index-of @playbook "manage.py migrate_clickhouse")]
     ;; After migrations, so a real migration adding it wins.
     (is (< migrate alter))))
+
+(deftest capture-image-is-pinned-not-floating
+  ;; The application and plugin server are already pinned to one commit; the
+  ;; capture service was still on a branch tag that moves under the deployment.
+  (let [fixture (slurp "test/fixtures/colors.yml")]
+    (is (re-find #"posthog-capture-image: \S+@sha256:[0-9a-f]{64}" fixture))
+    (is (not (re-find #"image:\s*\S+:(latest|master)\s*$" fixture)))))

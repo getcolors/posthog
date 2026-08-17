@@ -33,7 +33,8 @@ posthog-postgres-image: postgres:17-alpine
 posthog-clickhouse-image: clickhouse/clickhouse-server:26.6.2.158
 posthog-redis-image: redis:7.2-alpine
 posthog-plugin-server-image: posthog/posthog-node:82ea6681305bb00ad4ca920e3ba6e8fb39157424
-posthog-capture-image: ghcr.io/posthog/posthog/capture:master
+# :master resolved 2026-08-17.
+posthog-capture-image: ghcr.io/posthog/posthog/capture@sha256:8b07f51be1a8983c4d171b443a58c0deb3ab1e6e15202729cde85c3fa280b3e5
 posthog-temporal-image: temporalio/auto-setup:1.26.2
 posthog-kafka-image: redpandadata/redpanda:v25.1.9
 caddy-image: caddy:2.11.4
