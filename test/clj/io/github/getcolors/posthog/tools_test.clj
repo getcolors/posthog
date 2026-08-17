@@ -75,7 +75,7 @@
 (deftest datastores-start-before-migrations-and-app-after
   ;; Bringing `web` up first put the image's own startup migration in a race
   ;; with the explicit one, and the loser died on "relation already exists".
-  (let [start (str/index-of @playbook "docker compose up -d db redis clickhouse")
+  (let [start (str/index-of @playbook "docker compose up -d db redis kafka clickhouse")
         migrate (str/index-of @playbook "manage.py migrate_clickhouse")
         app (str/index-of @playbook "Converge the application containers")]
     (is (and start migrate app))
@@ -112,6 +112,7 @@
   ;; already correct, copy reports no change while the container still serves
   ;; the config it started with. The reload must key off the server's state.
   (is (str/includes? @playbook "FROM system.macros WHERE macro = 'hostClusterType'"))
+  (is (str/includes? @playbook "FROM system.named_collections WHERE name = 'msk_cluster'"))
   (is (str/includes? @playbook "clickhouse_macros.stdout"))
   ;; And the migration must not start before the reloaded server is answering.
   (let [reload (str/index-of @playbook "--force-recreate clickhouse")
@@ -126,3 +127,17 @@
   (is (str/includes? @playbook "<host>clickhouse</host><port>9000</port>"))
   ;; Keeper is embedded in the ClickHouse server, so those stay on loopback.
   (is (str/includes? @playbook "<host>127.0.0.1</host>\n                      <port>9181</port>")))
+
+(deftest ingestion-tier-is-present
+  ;; PostHog's path is capture -> Kafka -> plugin-server -> ClickHouse, and its
+  ;; ClickHouse migrations create Kafka engine tables, so a broker is required
+  ;; for the schema to exist at all -- not only for events to flow.
+  (let [compose (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/compose.yml")]
+    (is (str/includes? compose "  kafka:"))
+    (is (str/includes? compose "  plugin-server:"))
+    (is (str/includes? compose "./bin/plugin-server"))
+    (is (str/includes? compose "KAFKA_HOSTS"))
+    ;; Every named collection the migrations may reference must resolve.
+    (doseq [collection ["msk_cluster" "warpstream_ingestion" "warpstream_calculated_events"
+                        "warpstream_replay" "warpstream_shared" "warpstream_cyclotron"]]
+      (is (str/includes? @playbook (str "<" collection ">"))))))

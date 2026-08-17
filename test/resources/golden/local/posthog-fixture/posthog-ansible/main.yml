@@ -20,6 +20,7 @@
     - ansible.builtin.file: {path: "/var/lib/posthog/postgres", state: directory, mode: "0755"}
     - ansible.builtin.file: {path: "/var/lib/posthog/clickhouse", state: directory, mode: "0755"}
     - ansible.builtin.file: {path: "/var/lib/posthog/redis", state: directory, mode: "0755"}
+    - ansible.builtin.file: {path: "/var/lib/posthog/kafka", state: directory, mode: "0755", owner: "101", group: "101"}
     - ansible.builtin.file: {path: "/var/backups/posthog", state: directory, mode: "0700"}
     - ansible.builtin.file: {path: /var/lib/posthog/clickhouse-config.d, state: directory, mode: "0755"}
     # The replica host is published through system.clusters and dialled by the
@@ -123,6 +124,39 @@
                   <hostClusterRole>data</hostClusterRole>
               </macros>
           </clickhouse>
+    # PostHog's Kafka engine tables reference their broker through named
+    # collections rather than inline settings -- CLICKHOUSE_KAFKA_NAMED_COLLECTION
+    # defaults to msk_cluster, and the warpstream_* names are used by newer
+    # migrations. Every one must resolve or migrate_clickhouse fails with
+    # NAMED_COLLECTION_DOESNT_EXIST.
+    - name: Install ClickHouse named collections for Kafka
+      register: clickhouse_named_collections
+      ansible.builtin.copy:
+        dest: /var/lib/posthog/clickhouse-config.d/named-collections.xml
+        mode: "0644"
+        content: |
+          <clickhouse>
+              <named_collections>
+                  <msk_cluster>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </msk_cluster>
+                  <warpstream_ingestion>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_ingestion>
+                  <warpstream_calculated_events>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_calculated_events>
+                  <warpstream_replay>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_replay>
+                  <warpstream_shared>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_shared>
+                  <warpstream_cyclotron>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_cyclotron>
+              </named_collections>
+          </clickhouse>
     - name: Install stack configuration
       ansible.builtin.copy:
         src: "{{ item.src }}"
@@ -187,7 +221,7 @@
     # bringing `web` up before the explicit migration below puts two runners on
     # one schema and the loser dies on "relation already exists".
     - name: Start the datastores
-      ansible.builtin.command: docker compose up -d db redis clickhouse
+      ansible.builtin.command: docker compose up -d db redis kafka clickhouse
       args: {chdir: /opt/posthog}
       register: compose_up
       changed_when: "'Created' in (compose_up.stdout + compose_up.stderr) or 'Recreated' in (compose_up.stdout + compose_up.stderr)"
@@ -203,7 +237,7 @@
     - name: Check whether ClickHouse loaded the current configuration
       ansible.builtin.command:
         argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query,
-               "SELECT count() FROM system.macros WHERE macro = 'hostClusterType'"]
+               "SELECT (SELECT count() FROM system.macros WHERE macro = 'hostClusterType') + (SELECT count() FROM system.named_collections WHERE name = 'msk_cluster')"]
       args: {chdir: /opt/posthog}
       register: clickhouse_macros
       changed_when: false
@@ -213,7 +247,8 @@
       args: {chdir: /opt/posthog}
       when: >-
         clickhouse_clusters_config.changed or clickhouse_keeper_config.changed
-        or (clickhouse_macros.stdout | default('') | trim) != '1'
+        or clickhouse_named_collections.changed
+        or (clickhouse_macros.stdout | default('') | trim) != '2'
     - name: Wait for ClickHouse to accept queries
       ansible.builtin.command:
         argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query, "SELECT 1"]

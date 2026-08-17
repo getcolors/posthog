@@ -29,11 +29,13 @@ posthog-image: posthog/posthog:latest
 posthog-postgres-image: postgres:17-alpine
 posthog-clickhouse-image: clickhouse/clickhouse-server:24.8-alpine
 posthog-redis-image: redis:7.2-alpine
+posthog-kafka-image: redpandadata/redpanda:v25.1.9
 caddy-image: caddy:2.11.4
 
 posthog-postgres-data-dir: /var/lib/posthog/postgres
 posthog-clickhouse-data-dir: /var/lib/posthog/clickhouse
 posthog-redis-data-dir: /var/lib/posthog/redis
+posthog-kafka-data-dir: /var/lib/posthog/kafka
 posthog-backup-dir: /var/backups/posthog
 
 # --- Backups ----------------------------------------------------------------
