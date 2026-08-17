@@ -138,8 +138,11 @@
     (is (str/includes? compose "./bin/plugin-server"))
     (is (str/includes? compose "KAFKA_HOSTS"))
     ;; Every named collection the migrations may reference must resolve.
+    ;; The full set from upstream's docker/clickhouse/config.d/default.xml;
+    ;; settings.py only reveals six of the eight.
     (doseq [collection ["msk_cluster" "warpstream_ingestion" "warpstream_calculated_events"
-                        "warpstream_replay" "warpstream_shared" "warpstream_cyclotron"]]
+                        "warpstream_replay" "warpstream_shared" "warpstream_cyclotron"
+                        "warpstream_logs" "warpstream_traces"]]
       (is (str/includes? @playbook (str "<" collection ">"))))))
 
 (deftest system-log-tables-exist-before-migrations

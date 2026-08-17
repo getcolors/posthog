@@ -125,10 +125,10 @@
               </macros>
           </clickhouse>
     # PostHog's Kafka engine tables reference their broker through named
-    # collections rather than inline settings -- CLICKHOUSE_KAFKA_NAMED_COLLECTION
-    # defaults to msk_cluster, and the warpstream_* names are used by newer
-    # migrations. Every one must resolve or migrate_clickhouse fails with
-    # NAMED_COLLECTION_DOESNT_EXIST.
+    # collections rather than inline settings, and every one a migration names
+    # must resolve or it fails with NAMED_COLLECTION_DOESNT_EXIST. Only six are
+    # discoverable from settings; this is the full set from upstream's own
+    # docker/clickhouse/config.d/default.xml.
     - name: Install ClickHouse named collections for Kafka
       register: clickhouse_named_collections
       ansible.builtin.copy:
@@ -155,6 +155,12 @@
                   <warpstream_cyclotron>
                       <kafka_broker_list>kafka:9092</kafka_broker_list>
                   </warpstream_cyclotron>
+                  <warpstream_logs>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_logs>
+                  <warpstream_traces>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_traces>
               </named_collections>
           </clickhouse>
     - name: Install stack configuration
