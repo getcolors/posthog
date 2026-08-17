@@ -76,7 +76,17 @@
    [(tofu/construct :resource :cloudflare_dns_record :posthog
                     {:zone_id (zone-id (:posthog-zone opts))
                      :name (:posthog-host opts) :content (:ip opts) :type "A"
-                     :proxied true :ttl 1})]))
+                     ;; Proxied by default: an unproxied record publishes the
+                     ;; droplet's address. This was hardcoded true, so a
+                     ;; cloudflare-proxied key in colors.yml was read by
+                     ;; nothing and changed nothing -- no effect, no error,
+                     ;; exit 0. Honour it, and keep the safe value as the
+                     ;; default. The application trusts forwarded addresses
+                     ;; through IS_BEHIND_PROXY, so client IPs survive the edge.
+                     :proxied (if (some? (:cloudflare-proxied opts))
+                                (boolean (:cloudflare-proxied opts))
+                                true)
+                     :ttl 1})]))
 
 (defn dns-step [opts]
   (let [dir (tool-dir opts dns-tool)

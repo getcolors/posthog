@@ -13,7 +13,16 @@
   (let [json (tools/dns-json (assoc (fixture) :ip "192.0.2.10" :posthog-zone "example.com"))]
     (is (str/includes? json "posthog.example.com"))
     (is (str/includes? json "192.0.2.10"))
-    (is (str/includes? json "proxied"))))
+    ;; Assert the value, not the key: "proxied" is in the rendered record
+    ;; either way, so this passed on an unproxied record too.
+    (is (str/includes? json "\"proxied\" : true"))))
+
+(deftest dns-proxying-can-be-declined
+  ;; It was hardcoded, so setting the key did nothing and said nothing.
+  (is (str/includes? (tools/dns-json (assoc (fixture) :ip "192.0.2.10"
+                                            :posthog-zone "example.com"
+                                            :cloudflare-proxied false))
+                     "\"proxied\" : false")))
 
 (deftest inventory-keeps-one-private-target
   (let [inventory (tools/inventory (assoc (fixture) :ip "192.0.2.10"))]
