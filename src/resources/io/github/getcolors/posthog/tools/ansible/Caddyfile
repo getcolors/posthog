@@ -1,6 +1,6 @@
 <{ posthog-host }> {
   encode zstd gzip
-  reverse_proxy web:8000
+  reverse_proxy web:<{ posthog-web-port }>
   header {
     Strict-Transport-Security "max-age=31536000; includeSubDomains"
     X-Content-Type-Options "nosniff"

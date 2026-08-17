@@ -109,17 +109,48 @@
       register: compose_up
       changed_when: "'Built' in (compose_up.stdout + compose_up.stderr) or 'Created' in (compose_up.stdout + compose_up.stderr) or 'Recreated' in (compose_up.stdout + compose_up.stderr)"
     - ansible.builtin.systemd_service: {name: posthog-backup.timer, enabled: true, state: started}
-    - name: Wait for PostHog web service inside its container
+    - name: Wait for PostgreSQL to accept connections
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, pg_isready, -U, posthog]
+      args: {chdir: /opt/posthog}
+      register: db_ready
+      changed_when: false
+      retries: 60
+      delay: 5
+      until: db_ready.rc == 0
+    - name: Apply PostgreSQL and ClickHouse migrations
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - run
+          - --rm
+          - --no-deps
+          - -T
+          - web
+          - sh
+          - -c
+          - python manage.py migrate && python manage.py migrate_clickhouse
+      args: {chdir: /opt/posthog}
+      register: migrations
+      changed_when: "'No migrations to apply' not in (migrations.stdout + migrations.stderr)"
+    - name: Wait for the PostHog web service to answer its health endpoint
       ansible.builtin.command:
         argv:
           - docker
           - compose
           - exec
           - -T
-          - db
-          - pg_isready
-          - -U
-          - posthog
+          - web
+          - python
+          - -c
+          - |
+            import sys, urllib.request
+            try:
+                sys.exit(0 if urllib.request.urlopen(
+                    "http://127.0.0.1:8000/_health/", timeout=5).status == 200 else 1)
+            except Exception:
+                sys.exit(1)
       args: {chdir: /opt/posthog}
       register: local_health
       changed_when: false

@@ -18,7 +18,10 @@ services:
   redis:
     image: <{ posthog-redis-image }>
     restart: unless-stopped
-    command: redis-server --maxmemory-policy allkeys-lru --maxmemory 200mb
+    # PostHog's own hobby compose caps this at 200mb with allkeys-lru, but Redis
+    # is the Celery broker here: eviction silently drops queued ingestion tasks.
+    # Refuse to evict and give the broker room on the configured droplet size.
+    command: redis-server --maxmemory-policy noeviction --maxmemory 1gb
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -58,7 +61,6 @@ services:
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: ""
       REDIS_URL: "redis://redis:6379/"
-      POSTHOG_SKIP_MIGRATION_CHECKS: "1"
       SESSION_RECORDING_ENABLED: "false"
       OBJECT_STORAGE_ENABLED: "false"
     depends_on:
@@ -83,7 +85,6 @@ services:
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: ""
       REDIS_URL: "redis://redis:6379/"
-      POSTHOG_SKIP_MIGRATION_CHECKS: "1"
       SESSION_RECORDING_ENABLED: "false"
       OBJECT_STORAGE_ENABLED: "false"
     depends_on:
