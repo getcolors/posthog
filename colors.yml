@@ -2,13 +2,20 @@
 # Credentials belong in the gitignored .envrc.private as COLORS_PAR_* variables.
 # Never export COLORS_PAR_PROFILE: it selects this deployment's remote state.
 #
-# Required credentials:
+# Required credentials. The stack has no defaults for any of these: a real
+# create fails before the first provider call rather than falling back to a
+# value published in this repository.
 #   DigitalOcean    COLORS_PAR_DO_TOKEN
 #   Cloudflare      COLORS_PAR_CLOUDFLARE_API_TOKEN
 #   state in R2     COLORS_PAR_R2_ACCESS_KEY_ID
 #                   COLORS_PAR_R2_SECRET_ACCESS_KEY
 #   backups in R2   COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID
 #                   COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY
+#   application     COLORS_PAR_POSTHOG_SECRET_KEY
+#                   COLORS_PAR_POSTHOG_POSTGRES_PASSWORD
+#                   COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY
+#                   COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS
+#                   COLORS_PAR_POSTHOG_ADMIN_PASSWORD
 
 profile: posthog-example
 workdir: .colors
@@ -23,17 +30,34 @@ compute-prevent-destroy: true
 
 # --- PostHog Stack -----------------------------------------------------------
 
+# The owner account provisioned on every converge; its password is
+# COLORS_PAR_POSTHOG_ADMIN_PASSWORD. PostHog's hosted realm only lets the first
+# user create an organization, so the deployment owns this account rather than
+# leaving it to a signup that may already be impossible.
+posthog-admin-email: acceptance@example.invalid
+
 posthog-host: posthog.example.com
-posthog-image: posthog/posthog:latest
+# The application and plugin server images must come from one commit: they
+# share a Postgres schema, and a floating tag on either side means the node
+# process queries columns the application's migrations never created.
+posthog-image: posthog/posthog:82ea6681305bb00ad4ca920e3ba6e8fb39157424
 
 posthog-postgres-image: postgres:17-alpine
-posthog-clickhouse-image: clickhouse/clickhouse-server:24.8-alpine
+# Track the version upstream pins. PostHog's schema puts TTLs on DateTime64
+# columns, which 24.8 rejects outright.
+posthog-clickhouse-image: clickhouse/clickhouse-server:26.6.2.158
 posthog-redis-image: redis:7.2-alpine
+posthog-plugin-server-image: posthog/posthog-node:82ea6681305bb00ad4ca920e3ba6e8fb39157424
+# :master resolved 2026-08-17. A digest is the only pin that cannot move.
+posthog-capture-image: ghcr.io/posthog/posthog/capture@sha256:8b07f51be1a8983c4d171b443a58c0deb3ab1e6e15202729cde85c3fa280b3e5
+posthog-temporal-image: temporalio/auto-setup:1.26.2
+posthog-kafka-image: redpandadata/redpanda:v25.1.9
 caddy-image: caddy:2.11.4
 
 posthog-postgres-data-dir: /var/lib/posthog/postgres
 posthog-clickhouse-data-dir: /var/lib/posthog/clickhouse
 posthog-redis-data-dir: /var/lib/posthog/redis
+posthog-kafka-data-dir: /var/lib/posthog/kafka
 posthog-backup-dir: /var/backups/posthog
 
 # --- Backups ----------------------------------------------------------------
