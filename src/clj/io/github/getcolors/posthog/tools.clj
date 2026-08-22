@@ -126,11 +126,17 @@
 
 (defn ansible-step [opts]
   (let [dir (tool-dir opts ansible-tool)]
-    (ansible/ansible-with-spec opts
-      {:dir dir :inventory "inventory.json"
-       :playbooks {:create "main.yml" :delete "cleanup.yml"}
-       :host-key-checking false}
-      (ansible-specs opts))))
+    (if (and (= :delete (:green/event opts)) (not (:ip opts)))
+      ;; No compute in state: there is no host to clean up, and the rendered
+      ;; inventory would fall back to 192.0.2.10. Remove the rendered tree the
+      ;; way a completed cleanup would and let the teardown continue.
+      (assoc (sc/scaffold opts (ansible-specs opts))
+             :green/exit 0 :posthog/cleanup :skipped-no-compute)
+      (ansible/ansible-with-spec opts
+        {:dir dir :inventory "inventory.json"
+         :playbooks {:create "main.yml" :delete "cleanup.yml"}
+         :host-key-checking false}
+        (ansible-specs opts)))))
 
 ;; --- Acceptance --------------------------------------------------------------
 ;;
