@@ -13,9 +13,9 @@
 <script src="https://rybbit.getcolors.ai/api/script.js" data-site-id="9fb9c41a6d49" defer></script>
 </head>
 <body><main>
-  <p class="eyebrow">GREEN PACKAGE SKILL · DIGITALOCEAN · POSTHOG</p>
+  <p class="eyebrow">GREEN · RED · BLUE PACKAGE SKILL · DIGITALOCEAN · POSTHOG</p>
   <h1>PostHog Package Skill</h1>
-  <p class="lead">A reproducible Green workflow for one single-node PostHog product analytics suite: the Django application and Celery worker, ClickHouse with embedded Keeper, Redpanda, Temporal, the Rust capture service and the Node plugin server, behind Caddy with Cloudflare DNS and TLS.</p>
+  <p class="lead">A reproducible Green, Red, and Blue workflow for one single-node PostHog product analytics suite: the Django application and Celery worker, ClickHouse with embedded Keeper, Redpanda, Temporal, the Rust capture service and the Node plugin server, behind Caddy with Cloudflare DNS and TLS.</p>
 
   <div class="callout"><strong>Ten containers, and none of them are optional.</strong> PostHog’s ingestion path is capture → Kafka → plugin server → ClickHouse, its ClickHouse schema is built from <code>ReplicatedMergeTree</code> tables that require Keeper, and its Django startup connects to Temporal. Upstream’s own single-server compose defines roughly 35 services; this is a deliberate reduction to the set that actually has to be present.</div>
 
@@ -25,6 +25,7 @@ cp .agents/skills/package-posthog-green/green ./green
 chmod +x green
 ./green build
 ./green create --dry-run</code></pre>
+<p>Equivalent Red and Blue skills ship <code>red</code> and <code>blue</code> launchers.</p>
   <p><code>build</code> renders the deployment without credentials. The dry-run walks the whole workflow while skipping every side effect. A real <code>create</code> or <code>delete</code> touches live infrastructure and requires separate authorization.</p>
 
   <h2>Architecture and components</h2>
