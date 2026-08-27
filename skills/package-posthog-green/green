@@ -11,8 +11,8 @@
 ;; cloud resources, and overriding it from the environment can only point posthog
 ;; at another project's state.
 ;;
-;; This file is both the skill payload and the repository entry point — ./green
-;; in the project root is a symlink to it. It deliberately holds no logic of its
+;; This file is both the skill payload and the repository entry point — green/green
+;; in the repository is a symlink to it. It deliberately holds no logic of its
 ;; own: validation, the graph and the steps all live in the `posthog` library,
 ;; where the test suite reaches them. A copied payload is the one place in this
 ;; project where code cannot be tested, so nothing that can live elsewhere
@@ -33,10 +33,10 @@
 ;;
 ;; Nothing in this stack is published to Clojars, so a standalone copy of this
 ;; launcher resolves `posthog` as an immutable git dependency and lets tools.deps
-;; pull `green` transitively from posthog's own deps.edn. When the classpath
-;; already provides posthog — running inside the project, where bb.edn supplies a
-;; local root — bootstrap is skipped. POSTHOG_LIB_ROOT, GREEN_LIB_ROOT, and
-;; ONCE_LIB_ROOT override immutable dependencies with working trees.
+;; pull `once` and `green` transitively from posthog's own deps.edn. When the
+;; classpath already provides posthog — running inside the project, where bb.edn
+;; supplies local roots — the bootstrap is skipped entirely. POSTHOG_LIB_ROOT,
+;; ONCE_LIB_ROOT and GREEN_LIB_ROOT each override a pin with a working tree.
 
 (def ^:private launcher-contract
   "Minimum io.github.getcolors.posthog contract this launcher requires. Guarded at
@@ -50,7 +50,7 @@
 ;; cannot resolve its own library says so rather than inventing a SHA or
 ;; silently falling back to whatever is lying around. `bb pin` refuses to stamp
 ;; a dirty or unpushed HEAD for the same reason.
-(def ^:private posthog-sha "7ebd251be23b54fb50e115942e1f6e6aec4d9ba1")
+(def ^:private posthog-sha nil)
 
 (def ^:private posthog-git-url "https://github.com/getcolors/posthog.git")
 (def ^:private green-git-url "https://github.com/getcolors/green.git")
@@ -69,9 +69,9 @@
 
 (def ^:private bootstrap-error
   (when (and (System/getProperty "babashka.version") (not resolved?))
-    (let [posthog (lib-coord "POSTHOG_LIB_ROOT" posthog-git-url posthog-sha nil)
-          green (lib-coord "GREEN_LIB_ROOT" green-git-url nil nil)
-          once (lib-coord "ONCE_LIB_ROOT" once-git-url nil "green")]
+    (let [posthog (lib-coord "POSTHOG_LIB_ROOT" posthog-git-url posthog-sha "green")
+          once (lib-coord "ONCE_LIB_ROOT" once-git-url nil "green")
+          green (lib-coord "GREEN_LIB_ROOT" green-git-url nil nil)]
       (if-not posthog
         (str "this launcher carries no posthog pin.\n"
              "It has not been stamped by `bb pin`, which cannot run until the "
@@ -79,8 +79,8 @@
              "Point it at a checkout meanwhile: POSTHOG_LIB_ROOT=/path/to/posthog")
         (do ((requiring-resolve 'babashka.deps/add-deps)
              {:deps (cond-> {'io.github.getcolors/posthog posthog}
-                      green (assoc 'io.github.getcolors/green green)
-                      once (assoc 'io.github.getcolors/once once))})
+                      once (assoc 'io.github.getcolors/once once)
+                      green (assoc 'io.github.getcolors/green green))})
             nil)))))
 
 ;; Nothing is required at the top level, deliberately. A bootstrap that resolved

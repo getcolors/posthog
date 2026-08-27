@@ -3,8 +3,10 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 launcher="$root/skills/package-posthog-green/green"
 grep -q 'io.github.getcolors.posthog.workflow/workflow' "$launcher"
-grep -q 'def \^:private posthog-sha' "$launcher"
-[[ -L "$root/green" ]] && [[ $(readlink "$root/green") == skills/package-posthog-green/green ]]
+grep -qE '\(def \^:private posthog-sha (nil|"[0-9a-f]{40}")\)' "$launcher"
+[[ -L "$root/green/green" ]] && [[ $(readlink "$root/green/green") == ../skills/package-posthog-green/green ]]
+[[ -L "$root/red/red" ]] && [[ $(readlink "$root/red/red") == ../skills/package-posthog-red/red ]]
+[[ -L "$root/blue/blue" ]] && [[ $(readlink "$root/blue/blue") == ../skills/package-posthog-blue/blue ]]
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cp "$launcher" "$tmp/green"; chmod +x "$tmp/green"
 sed "s#WORKDIR#.colors#" "$root/test/fixtures/colors.yml" > "$tmp/colors.yml"

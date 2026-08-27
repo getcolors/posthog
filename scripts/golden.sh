@@ -4,7 +4,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fixture="$tmp/colors.yml"
 sed "s#WORKDIR#$tmp/work#" "$root/test/fixtures/colors.yml" > "$fixture"
-POSTHOG_LIB_ROOT="$root" "$root/green" build -f "$fixture" >/dev/null
+(cd "$root/green" && POSTHOG_LIB_ROOT="$root" ./green build -f "$fixture" >/dev/null)
 actual="$tmp/work/posthog-fixture"
 golden="$root/test/resources/golden/local/posthog-fixture"
 # No rendered artefact may carry a real secret into a committed golden. Checked

@@ -1,0 +1,288 @@
+# One definition of the application environment, shared by every PostHog
+# process. Three near-identical copies drifted; a merge key cannot.
+x-posthog-environment: &posthog-environment
+  SITE_URL: "https://<{ posthog-host }>"
+  SECRET_KEY: "{{ lookup('env','COLORS_PAR_POSTHOG_SECRET_KEY') }}"
+  DATABASE_URL: "postgres://posthog:{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | urlencode | replace('/', '%2F') }}@db:5432/posthog"
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: 8123
+  CLICKHOUSE_HTTP_PORT: 8123
+  CLICKHOUSE_SECURE: "false"
+  CLICKHOUSE_DATABASE: default
+  CLICKHOUSE_USER: default
+  CLICKHOUSE_PASSWORD: ""
+  CLICKHOUSE_CLUSTER: posthog
+  REDIS_URL: "redis://redis:6379/"
+  KAFKA_HOSTS: "kafka:9092"
+  KAFKA_URL: "kafka://kafka:9092"
+  # Django probes the plugin server through this to report its health, and the
+  # default is a Kubernetes service name that resolves nowhere here -- so a
+  # working plugin server is reported as an error in the setup UI.
+  CDP_API_URL: "http://plugins:6738"
+  TEMPORAL_HOST: temporal
+  TEMPORAL_PORT: "7233"
+  # A block scalar keeps the file valid YAML both as a template and once
+  # rendered; indent() lines the PEM up under it.
+  OIDC_RSA_PRIVATE_KEY: |
+    {{ lookup('env','COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY') | indent(4) }}
+  # Behind Caddy and Cloudflare, Django cannot see that the request arrived
+  # over TLS and redirects every non-exempt path to itself -- /_health/ is
+  # exempt, so the site looks fine while /capture/ loops forever.
+  # Both the application and the plugin server encrypt fields with this, so it
+  # has to be one value shared by every process: the plugin server throws
+  # "Encryption keys are not set" at startup and exits without it, and at info
+  # level that appears as an ordinary clean shutdown.
+  ENCRYPTION_SALT_KEYS: "{{ lookup('env','COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS') }}"
+  # This flag was removed earlier in this package's history, correctly: it was
+  # set while nothing ran migrations at all, so it suppressed the one error that
+  # would have revealed an empty ClickHouse. It returns for the opposite reason.
+  # The playbook now runs migrate and migrate_clickhouse explicitly and fails
+  # the converge if either does, which is a stronger guarantee than the check;
+  # meanwhile the in-container check also runs run_async_migrations --check,
+  # which needs the async-migrations setup this deployment does not run, and
+  # blocks the server from ever binding.
+  POSTHOG_SKIP_MIGRATION_CHECKS: "1"
+  IS_BEHIND_PROXY: "true"
+  TRUST_ALL_PROXIES: "true"
+  SESSION_RECORDING_ENABLED: "false"
+  OBJECT_STORAGE_ENABLED: "false"
+
+services:
+  db:
+    image: <{ posthog-postgres-image }>
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: posthog
+      POSTGRES_DB: posthog
+      POSTGRES_PASSWORD: "{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') }}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U posthog"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+    volumes:
+      - <{ posthog-postgres-data-dir }>:/var/lib/postgresql/data
+    networks: [internal]
+
+  redis:
+    image: <{ posthog-redis-image }>
+    restart: unless-stopped
+    # PostHog's own hobby compose caps this at 200mb with allkeys-lru, but Redis
+    # is the Celery broker here: eviction silently drops queued ingestion tasks.
+    # Refuse to evict and give the broker room on the configured droplet size.
+    command: redis-server --maxmemory-policy noeviction --maxmemory 1gb
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - <{ posthog-redis-data-dir }>:/data
+    networks: [internal]
+
+  # PostHog's ingestion path is capture -> Kafka -> plugin-server -> ClickHouse,
+  # and its ClickHouse migrations create Kafka engine tables, so the broker is
+  # not optional: without it migrate_clickhouse cannot complete. Upstream runs
+  # Redpanda rather than Kafka itself, and this mirrors that service.
+  kafka:
+    image: <{ posthog-kafka-image }>
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092
+      - --advertise-kafka-addr internal://kafka:9092
+      - --rpc-addr kafka:33145
+      - --advertise-rpc-addr kafka:33145
+      - --mode dev-container
+      - --smp 2
+      - --memory 3G
+      - --reserve-memory 500M
+      - --overprovisioned
+      - --set redpanda.empty_seed_starts_cluster=false
+      - --seeds kafka:33145
+      - --set redpanda.auto_create_topics_enabled=true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9644/v1/status/ready || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+    volumes:
+      - <{ posthog-kafka-data-dir }>:/var/lib/redpanda/data
+    networks: [internal]
+
+  # Django connects to Temporal on startup through the Rust SDK bridge, and a
+  # failure there stops the web process binding at all -- not a degraded
+  # feature, no listener. Persistence lives in the Postgres already here;
+  # Elasticsearch is upstream's visibility store and is not required.
+  temporal:
+    image: <{ posthog-temporal-image }>
+    restart: unless-stopped
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: posthog
+      POSTGRES_PWD: "{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') }}"
+      POSTGRES_SEEDS: db
+      # upstream mounts development-sql.yaml from its own repo; the image itself
+      # only ships docker.yaml, and a missing file stops the server booting.
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+      ENABLE_ES: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z $$(hostname) 7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    depends_on:
+      db: {condition: service_healthy}
+    networks: [internal]
+
+  # Event ingestion is not part of the Django application: /capture/, /e/ and
+  # /i/v0/e/ all resolve to its catch-all frontend view, which rejects them with
+  # a CSRF 403. Capture is a separate Rust service that writes to Kafka, and
+  # without it the stack can serve a dashboard but cannot receive an event.
+  capture:
+    image: <{ posthog-capture-image }>
+    restart: unless-stopped
+    environment:
+      ADDRESS: "0.0.0.0:3000"
+      CAPTURE_MODE: events
+      RUST_LOG: "info,rdkafka=warn"
+      KAFKA_HOSTS: "kafka:9092"
+      KAFKA_TOPIC: "events_plugin_ingestion"
+      KAFKA_ERROR_TRACKING_TOPIC: "ingestion-errortracking-main"
+      REDIS_URL: "redis://redis:6379/"
+      CAPTURE_V1_SINKS: "msk"
+      CAPTURE_V1_SINK_MSK_KAFKA_HOSTS: "kafka:9092"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_MAIN: "events_plugin_ingestion"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_HISTORICAL: "events_plugin_ingestion_historical"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_OVERFLOW: "events_plugin_ingestion_overflow"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_DLQ: "events_plugin_ingestion_dlq"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_EXCEPTION: "ingestion-errortracking-main"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_HEATMAP: "heatmaps_ingestion"
+      CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_CLIENT_INGESTION_WARNING: "ingestion-clientwarnings-main-1"
+    depends_on:
+      kafka: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [internal]
+
+  clickhouse:
+    image: <{ posthog-clickhouse-image }>
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+      KAFKA_HOSTS: "kafka:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    volumes:
+      - <{ posthog-clickhouse-data-dir }>:/var/lib/clickhouse
+      - /var/lib/posthog/clickhouse-config.d/clusters.xml:/etc/clickhouse-server/config.d/clusters.xml:ro
+      - /var/lib/posthog/clickhouse-config.d/keeper.xml:/etc/clickhouse-server/config.d/keeper.xml:ro
+      - /var/lib/posthog/clickhouse-config.d/named-collections.xml:/etc/clickhouse-server/config.d/named-collections.xml:ro
+    depends_on:
+      kafka: {condition: service_healthy}
+    networks: [internal]
+
+  # The image's default entrypoint is ./bin/docker, which runs ./bin/migrate
+  # before serving; migrations are an explicit step here, and that script loops
+  # on schedule_temporal_workflows so the server never binds. Serve only.
+  web:
+    image: <{ posthog-image }>
+    command: ./bin/docker-server
+    restart: unless-stopped
+    environment: *posthog-environment
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      temporal: {condition: service_healthy}
+    networks: [internal]
+
+  worker:
+    image: <{ posthog-image }>
+    command: ./bin/docker-worker-celery --with-scheduler
+    restart: unless-stopped
+    environment: *posthog-environment
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      temporal: {condition: service_healthy}
+    networks: [internal]
+
+  # Capture writes to events_plugin_ingestion; ClickHouse's Kafka engine tables
+  # read clickhouse_* topics. Nothing bridges the two without this consumer, so
+  # events reach Kafka and stop there -- accepted by the API, absent from the
+  # database. It ships as a separate Node image, not part of posthog/posthog.
+  plugins:
+    image: <{ posthog-plugin-server-image }>
+    restart: unless-stopped
+    environment:
+      <<: *posthog-environment
+      PERSONS_DATABASE_URL: "postgres://posthog:{{ lookup('env','COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | urlencode | replace('/', '%2F') }}@db:5432/posthog"
+      CLICKHOUSE_VERIFY: "false"
+      # With no mode the process starts, finds no capabilities to run, and exits
+      # cleanly -- which reads as a healthy shutdown rather than a failure.
+      # This is the mode that consumes events_plugin_ingestion and produces the
+      # clickhouse_events_json topic ClickHouse is already subscribed to.
+      PLUGIN_SERVER_MODE: ingestion-v2-combined
+      # The plugin server opens several independent Redis clients, and only the
+      # first reads REDIS_URL; the rest default to 127.0.0.1 and take the whole
+      # process down with them when they cannot connect. Upstream runs more than
+      # one Redis, so each has its own host setting -- here they are all the one
+      # Redis this stack has.
+      POSTHOG_REDIS_HOST: redis
+      POSTHOG_REDIS_PORT: "6379"
+      INGESTION_REDIS_HOST: redis
+      INGESTION_REDIS_PORT: "6379"
+      CDP_REDIS_HOST: redis
+      CDP_REDIS_PORT: "6379"
+      LOGS_REDIS_HOST: redis
+      LOGS_REDIS_PORT: "6379"
+      COOKIELESS_REDIS_HOST: redis
+      COOKIELESS_REDIS_PORT: "6379"
+      CAPTURE_CONFIG_REDIS_HOST: redis
+      POSTHOG_SESSION_RECORDING_REDIS_HOST: redis
+      POSTHOG_SESSION_RECORDING_REDIS_PORT: "6379"
+      SESSION_RECORDING_API_REDIS_HOST: redis
+      SESSION_RECORDING_API_REDIS_PORT: "6379"
+    volumes:
+      # Resolved relative to the process, so mount it everywhere it may look.
+      - /var/lib/posthog/share/GeoLite2-City.mmdb:/share/GeoLite2-City.mmdb:ro
+      - /var/lib/posthog/share/GeoLite2-City.mmdb:/code/share/GeoLite2-City.mmdb:ro
+      - /var/lib/posthog/share/GeoLite2-City.mmdb:/code/nodejs/share/GeoLite2-City.mmdb:ro
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    networks: [internal]
+
+  caddy:
+    image: <{ caddy-image }>
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [web]
+    # Access logs are now on, so bound them: an ingestion endpoint writes a
+    # line per request and the default json-file driver never rotates.
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+    networks: [internal]
+
+networks:
+  internal:
+    internal: false
+volumes:
+  caddy-data:
+  caddy-config:

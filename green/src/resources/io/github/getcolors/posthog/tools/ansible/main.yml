@@ -1,0 +1,476 @@
+---
+- name: Install production single-node PostHog
+  hosts: posthog
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - ansible.builtin.wait_for_connection: {connect_timeout: 10, delay: 5, sleep: 5, timeout: 600}
+    - ansible.builtin.setup:
+  tasks:
+    - name: Install Docker and backup tooling
+      ansible.builtin.apt:
+        name: [docker.io, docker-compose-v2, rclone, ca-certificates, curl]
+        state: present
+        # No cache_valid_time: a fresh droplet ships apt lists old enough to
+        # name package versions the archive has already superseded, and the
+        # install then fails on a 404 rather than fetching a current index.
+        update_cache: true
+    - ansible.builtin.systemd_service: {name: docker, enabled: true, state: started}
+    - ansible.builtin.file: {path: /opt/posthog, state: directory, mode: "0755"}
+    - ansible.builtin.file: {path: "<{ posthog-postgres-data-dir }>", state: directory, mode: "0755"}
+    - ansible.builtin.file: {path: "<{ posthog-clickhouse-data-dir }>", state: directory, mode: "0755"}
+    - ansible.builtin.file: {path: "<{ posthog-redis-data-dir }>", state: directory, mode: "0755"}
+    - ansible.builtin.file: {path: "<{ posthog-kafka-data-dir }>", state: directory, mode: "0755", owner: "101", group: "101"}
+    - ansible.builtin.file: {path: "<{ posthog-backup-dir }>", state: directory, mode: "0700"}
+    - ansible.builtin.file: {path: /var/lib/posthog/clickhouse-config.d, state: directory, mode: "0755"}
+    # The replica host is published through system.clusters and dialled by the
+    # web and worker containers, so it must be the compose service name: from
+    # inside those containers 127.0.0.1 is themselves, and the connection is
+    # refused. ClickHouse resolves its own service name too, so is_local still
+    # holds.
+    - name: Install ClickHouse clusters configuration
+      register: clickhouse_clusters_config
+      ansible.builtin.copy:
+        dest: /var/lib/posthog/clickhouse-config.d/clusters.xml
+        mode: "0644"
+        content: |
+          <clickhouse>
+              <remote_servers>
+                  <posthog>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </posthog>
+                  <posthog_migrations>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </posthog_migrations>
+                  <posthog_single_shard>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </posthog_single_shard>
+                  <posthog_writable>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </posthog_writable>
+                  <posthog_primary_replica>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </posthog_primary_replica>
+                  <ai_events>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </ai_events>
+                  <aux>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </aux>
+                  <ops>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </ops>
+                  <sessions>
+                      <shard><replica><host>clickhouse</host><port>9000</port></replica></shard>
+                  </sessions>
+              </remote_servers>
+          </clickhouse>
+    # PostHog's migrate_clickhouse passes replicated=True unconditionally, so
+    # every table it creates is a ReplicatedMergeTree and needs coordination
+    # metadata -- without it the very first CREATE TABLE dies with "There is no
+    # Zookeeper configuration in server config". A single node does not need a
+    # separate ZooKeeper for that: ClickHouse Keeper runs embedded in the same
+    # server. The macros supply the {shard}/{replica} substitutions the
+    # replicated table paths are built from.
+    - name: Install embedded ClickHouse Keeper configuration
+      register: clickhouse_keeper_config
+      ansible.builtin.copy:
+        dest: /var/lib/posthog/clickhouse-config.d/keeper.xml
+        mode: "0644"
+        content: |
+          <clickhouse>
+              <keeper_server>
+                  <tcp_port>9181</tcp_port>
+                  <server_id>1</server_id>
+                  <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+                  <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+                  <coordination_settings>
+                      <operation_timeout_ms>10000</operation_timeout_ms>
+                      <session_timeout_ms>30000</session_timeout_ms>
+                      <raft_logs_level>warning</raft_logs_level>
+                  </coordination_settings>
+                  <raft_configuration>
+                      <server>
+                          <id>1</id>
+                          <hostname>127.0.0.1</hostname>
+                          <port>9234</port>
+                      </server>
+                  </raft_configuration>
+              </keeper_server>
+              <zookeeper>
+                  <node>
+                      <host>127.0.0.1</host>
+                      <port>9181</port>
+                  </node>
+              </zookeeper>
+              <!--
+                  posthog/clickhouse/cluster.py selects hosts with
+                  `getMacro('hostClusterType')` and `getMacro('hostClusterRole')`
+                  and filters them as
+
+                      (role in requested_roles or ALL in requested_roles)
+                      and (type == workload or workload == DEFAULT)
+
+                  so ALL is a wildcard on the requesting side, not the host
+                  side: a node labelled "all" matches only callers that pass
+                  ALL, while "data" matches both DATA and ALL. Upstream ships
+                  these macros from its own deployment tooling rather than its
+                  config.xml, so a single node has to declare them itself.
+              -->
+              <macros>
+                  <shard>1</shard>
+                  <replica>replica-1</replica>
+                  <hostClusterType>online</hostClusterType>
+                  <hostClusterRole>data</hostClusterRole>
+              </macros>
+          </clickhouse>
+    # PostHog's Kafka engine tables reference their broker through named
+    # collections rather than inline settings, and every one a migration names
+    # must resolve or it fails with NAMED_COLLECTION_DOESNT_EXIST. Only six are
+    # discoverable from settings; this is the full set from upstream's own
+    # docker/clickhouse/config.d/default.xml.
+    - name: Install ClickHouse named collections for Kafka
+      register: clickhouse_named_collections
+      ansible.builtin.copy:
+        dest: /var/lib/posthog/clickhouse-config.d/named-collections.xml
+        mode: "0644"
+        content: |
+          <clickhouse>
+              <named_collections>
+                  <msk_cluster>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </msk_cluster>
+                  <warpstream_ingestion>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_ingestion>
+                  <warpstream_calculated_events>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_calculated_events>
+                  <warpstream_replay>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_replay>
+                  <warpstream_shared>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_shared>
+                  <warpstream_cyclotron>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_cyclotron>
+                  <warpstream_logs>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_logs>
+                  <warpstream_traces>
+                      <kafka_broker_list>kafka:9092</kafka_broker_list>
+                  </warpstream_traces>
+              </named_collections>
+          </clickhouse>
+    - name: Install stack configuration
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode | default('0644') }}"
+      loop:
+        - {src: Caddyfile, dest: /opt/posthog/Caddyfile}
+        - {src: backup, dest: /usr/local/sbin/posthog-backup, mode: "0700"}
+    - name: Require the application secrets the compose file interpolates
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'COLORS_PAR_POSTHOG_SECRET_KEY') | length > 0
+          - lookup('env', 'COLORS_PAR_POSTHOG_POSTGRES_PASSWORD') | length > 0
+          - lookup('env', 'COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY') | length > 0
+          - lookup('env', 'COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS') | length > 0
+          - lookup('env', 'COLORS_PAR_POSTHOG_ADMIN_PASSWORD') | length > 0
+        fail_msg: >-
+          COLORS_PAR_POSTHOG_SECRET_KEY, COLORS_PAR_POSTHOG_POSTGRES_PASSWORD and
+          COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY must be set; this stack has no
+          default credentials.
+        quiet: true
+    - name: Render the compose file with run-time credentials
+      ansible.builtin.template:
+        src: compose.yml
+        dest: /opt/posthog/compose.yml
+        mode: "0600"
+      no_log: true
+    - name: Install backup credentials outside generated and tracked files
+      ansible.builtin.copy:
+        dest: /etc/posthog-backup.env
+        mode: "0600"
+        content: |
+          POSTHOG_BACKUP_R2_ACCESS_KEY_ID={{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID') }}
+          POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY={{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY') }}
+      no_log: true
+    - name: Install backup service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/posthog-backup.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Consistent PostHog single-node backup
+          Requires=docker.service
+          After=docker.service
+          [Service]
+          Type=oneshot
+          EnvironmentFile=/etc/posthog-backup.env
+          ExecStart=/usr/local/sbin/posthog-backup
+      notify: Reload systemd
+    - name: Install backup timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/posthog-backup.timer
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Daily PostHog backup
+          [Timer]
+          OnCalendar=<{ posthog-backup-oncalendar }>
+          Persistent=true
+          RandomizedDelaySec=300
+          [Install]
+          WantedBy=timers.target
+      notify: Reload systemd
+    - ansible.builtin.meta: flush_handlers
+    # Start the datastores alone. The application image migrates on startup, so
+    # bringing `web` up before the explicit migration below puts two runners on
+    # one schema and the loser dies on "relation already exists".
+    - name: Start the datastores
+      ansible.builtin.command: docker compose up -d db redis kafka clickhouse
+      args: {chdir: /opt/posthog}
+      register: compose_up
+      changed_when: "'Created' in (compose_up.stdout + compose_up.stderr) or 'Recreated' in (compose_up.stdout + compose_up.stderr)"
+    - ansible.builtin.systemd_service: {name: posthog-backup.timer, enabled: true, state: started}
+    # A single-file bind mount is bound to the inode it resolved at start, and
+    # ansible.builtin.copy replaces files by rename, so a changed config leaves
+    # the container serving the old content indefinitely -- the host path looks
+    # correct while the server disagrees. Recreating re-resolves the mount.
+    # Ask the server what it actually loaded rather than trusting this run's
+    # change flags: on a converge where the files were already correct, `copy`
+    # reports no change while a container started before them keeps serving the
+    # old config forever. The macro stands in for "has the current config".
+    - name: Check whether ClickHouse loaded the current configuration
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query,
+               "SELECT (SELECT count() FROM system.macros WHERE macro = 'hostClusterType') + (SELECT count() FROM system.named_collections WHERE name = 'msk_cluster')"]
+      args: {chdir: /opt/posthog}
+      register: clickhouse_macros
+      changed_when: false
+      failed_when: false
+    - name: Reload ClickHouse when its configuration changed or is stale
+      ansible.builtin.command: docker compose up -d --force-recreate clickhouse
+      args: {chdir: /opt/posthog}
+      when: >-
+        clickhouse_clusters_config.changed or clickhouse_keeper_config.changed
+        or clickhouse_named_collections.changed
+        or (clickhouse_macros.stdout | default('') | trim) != '2'
+    - name: Wait for ClickHouse to accept queries
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query, "SELECT 1"]
+      args: {chdir: /opt/posthog}
+      register: clickhouse_ready
+      changed_when: false
+      retries: 60
+      delay: 5
+      until: clickhouse_ready.rc == 0
+    # System log tables are created on first write, so a freshly started server
+    # has no system.crash_log -- and a PostHog migration builds a metrics view
+    # over it, failing with "Unknown table expression identifier". Flushing the
+    # logs materialises them before the migrations run.
+    - name: Materialise the ClickHouse system log tables
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query, "SYSTEM FLUSH LOGS"]
+      args: {chdir: /opt/posthog}
+      changed_when: false
+    - name: Wait for PostgreSQL to accept connections
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, pg_isready, -U, posthog]
+      args: {chdir: /opt/posthog}
+      register: db_ready
+      changed_when: false
+      retries: 60
+      delay: 5
+      until: db_ready.rc == 0
+    # The plugin server loads a GeoIP database at startup and dies without it,
+    # but its own image does not ship one -- the application image does. Lift it
+    # across rather than carrying 66MB in this repository.
+    - name: Extract the GeoIP database from the application image
+      ansible.builtin.shell: |
+        set -euo pipefail
+        mkdir -p /var/lib/posthog/share
+        docker run --rm --entrypoint sh <{ posthog-image }> \
+          -c 'cat /code/share/GeoLite2-City.mmdb' > /var/lib/posthog/share/GeoLite2-City.mmdb
+      args:
+        chdir: /opt/posthog
+        executable: /bin/bash
+        creates: /var/lib/posthog/share/GeoLite2-City.mmdb
+    - name: Install the schema checkpoint
+      ansible.builtin.copy:
+        src: checkpoint.sql
+        dest: /opt/posthog/checkpoint.sql
+        mode: "0644"
+    # A checkpoint only applies to the commit it was taken from. Behind the
+    # image on one lineage it heals forward, because migrate applies the delta;
+    # from a divergent commit it leaves migrations the image has never heard of
+    # and migrate stops on orphaned migrations. Compare commits and migrate from
+    # zero when they differ rather than restoring something that cannot heal.
+    - name: Read the commit the application image was built from
+      ansible.builtin.command:
+        argv: [docker, compose, run, --rm, --no-deps, -T, --entrypoint, cat, web, /code/commit.txt]
+      args: {chdir: /opt/posthog}
+      register: posthog_image_commit
+      changed_when: false
+      failed_when: false
+    - name: Read the commit the checkpoint was taken from
+      ansible.builtin.shell: |
+        sed -n 's/^-- posthog-commit: //p' checkpoint.sql | head -1
+      args: {chdir: /opt/posthog, executable: /bin/bash}
+      register: posthog_checkpoint_commit
+      changed_when: false
+    - name: Check whether PostgreSQL already holds the application schema
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, psql, -U, posthog, -d, posthog, -tAc,
+               "select count(*) from information_schema.tables where table_schema = 'public'"]
+      args: {chdir: /opt/posthog}
+      register: posthog_schema
+      changed_when: false
+    # Replaying every migration from zero takes over an hour on this hardware.
+    # The checkpoint carries the schema and the django_migrations rows, so the
+    # migrate step below applies only what the image adds on top. It is never
+    # --fake and never runs against a database that already has tables, so a
+    # checkpoint behind the image heals forward and one ahead of it fails loudly
+    # rather than silently.
+    - name: Restore the schema checkpoint into an empty database
+      ansible.builtin.shell: |
+        set -euo pipefail
+        docker compose exec -T db psql -U posthog -d posthog -q -v ON_ERROR_STOP=1 < checkpoint.sql
+      args: {chdir: /opt/posthog, executable: /bin/bash}
+      when:
+        - (posthog_schema.stdout | default('0') | trim | int) == 0
+        - (posthog_checkpoint_commit.stdout | default('') | trim) != ''
+        - (posthog_checkpoint_commit.stdout | trim) == (posthog_image_commit.stdout | default('') | trim)
+    - name: Apply PostgreSQL and ClickHouse migrations
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - run
+          - --rm
+          - --no-deps
+          - -T
+          - web
+          - sh
+          - -c
+          - python manage.py migrate && python manage.py migrate_clickhouse
+      args: {chdir: /opt/posthog}
+      register: migrations
+      changed_when: "'No migrations to apply' not in (migrations.stdout + migrations.stderr)"
+    # posthog/posthog-node at this commit queries posthog_person.last_seen_at,
+    # and the application's migrations at the same commit do not create it. The
+    # ingestion consumer therefore dies on its first message and events stop in
+    # Kafka -- accepted by the API, absent from the database. This compensates
+    # for that mismatch and is written IF NOT EXISTS, so an image that grows the
+    # column properly is unaffected.
+    # Celery refuses to start until required async migrations are complete, and
+    # they can normally only be run from the UI or by Celery itself -- which
+    # cannot start. This completes the ones upstream classifies as no-ops.
+    - name: Complete the async migrations that are no-ops
+      ansible.builtin.command:
+        argv: [docker, compose, run, --rm, --no-deps, -T, web, python, manage.py,
+               run_async_migrations, --complete-noop-migrations]
+      args: {chdir: /opt/posthog}
+      changed_when: false
+    - name: Count stored events
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, clickhouse, clickhouse-client, --query,
+               "SELECT count() FROM default.events"]
+      args: {chdir: /opt/posthog}
+      register: posthog_event_count
+      changed_when: false
+      failed_when: false
+    # The rest are backfills. Over zero events a backfill is provably a no-op,
+    # so completing them on an empty deployment is safe and unblocks Celery.
+    # Where events exist this is skipped: run them from the UI instead.
+    - name: Complete backfill async migrations on an empty deployment
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, psql, -U, posthog, -d, posthog, -q, -c,
+               "UPDATE posthog_asyncmigration SET status = 2 WHERE status = 0"]
+      args: {chdir: /opt/posthog}
+      when: (posthog_event_count.stdout | default('1') | trim | int) == 0
+      changed_when: false
+    - name: Add the person column the plugin server queries
+      ansible.builtin.command:
+        argv: [docker, compose, exec, -T, db, psql, -U, posthog, -d, posthog, -q,
+               -v, ON_ERROR_STOP=1, -c,
+               "ALTER TABLE posthog_person ADD COLUMN IF NOT EXISTS last_seen_at timestamptz NULL"]
+      args: {chdir: /opt/posthog}
+      changed_when: false
+    # A fresh instance has no user, and PostHog's hosted realm only lets the
+    # first user create an organization -- so once anything creates one, the
+    # signup page shows an invite wall and nobody can get in. The deployment
+    # owns the account instead. See owner.py for the three cases it handles.
+    - name: Install the owner provisioning script
+      ansible.builtin.copy:
+        src: owner.py
+        dest: /opt/posthog/owner.py
+        mode: "0644"
+    - name: Ensure the owner account exists
+      ansible.builtin.shell: |
+        set -euo pipefail
+        docker compose run --rm --no-deps -T \
+          -e PH_EMAIL="$PH_EMAIL" -e PH_PASSWORD="$PH_PASSWORD" \
+          web python manage.py shell < owner.py
+      args: {chdir: /opt/posthog, executable: /bin/bash}
+      environment:
+        PH_EMAIL: "<{ posthog-admin-email }>"
+        PH_PASSWORD: "{{ lookup('env','COLORS_PAR_POSTHOG_ADMIN_PASSWORD') }}"
+      register: posthog_owner
+      changed_when: "'OWNER=bootstrapped' in posthog_owner.stdout or 'OWNER=joined' in posthog_owner.stdout"
+      no_log: true
+    - name: Converge the application containers
+      ansible.builtin.command: docker compose up -d --remove-orphans
+      args: {chdir: /opt/posthog}
+      register: app_up
+      changed_when: "'Created' in (app_up.stdout + app_up.stderr) or 'Recreated' in (app_up.stdout + app_up.stderr)"
+    # Caddy mounts its Caddyfile as a single file, so the same inode trap as the
+    # ClickHouse configs applies: ansible.builtin.copy replaces the file by
+    # rename and the container keeps serving the config it started with, with
+    # the host file looking correct. Compare what Caddy is actually running.
+    - name: Read the Caddyfile checksum Caddy is serving
+      ansible.builtin.shell: |
+        docker compose exec -T caddy sha256sum /etc/caddy/Caddyfile 2>/dev/null | awk '{print $1}'
+      args: {chdir: /opt/posthog, executable: /bin/bash}
+      register: caddy_running_config
+      changed_when: false
+      failed_when: false
+    - ansible.builtin.stat: {path: /opt/posthog/Caddyfile, checksum_algorithm: sha256}
+      register: caddyfile_desired
+    - name: Reload Caddy when its configuration is stale
+      ansible.builtin.command: docker compose up -d --force-recreate caddy
+      args: {chdir: /opt/posthog}
+      when: (caddy_running_config.stdout | default('') | trim) != caddyfile_desired.stat.checksum
+    - name: Wait for the PostHog web service to answer its health endpoint
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - exec
+          - -T
+          - web
+          - python
+          - -c
+          - |
+            import sys, urllib.request
+            try:
+                sys.exit(0 if urllib.request.urlopen(
+                    "http://127.0.0.1:<{ posthog-web-port }>/_health/", timeout=5).status == 200 else 1)
+            except Exception:
+                sys.exit(1)
+      args: {chdir: /opt/posthog}
+      register: local_health
+      changed_when: false
+      # NGINX Unit boots four Django workers, each loading the whole
+      # application; measured at well over five minutes on first start before
+      # /_health/ answers in under two seconds. Wait for the real thing rather
+      # than declaring failure while it is still coming up.
+      retries: 120
+      delay: 10
+      until: local_health.rc == 0
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd_service: {daemon_reload: true}

@@ -1,0 +1,455 @@
+"""OpenTofu and Ansible stages for the single-node PostHog suite, the port of
+io.github.getcolors.posthog.tools."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import re
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+from blue import tofu
+from blue.ansible import ansible_with_spec
+from blue.cli import stage_dir
+from blue.runtime import runtime
+from blue.scaffold import PRESERVE_JINJA_DELIMITERS, content_spec, scaffold
+from blue.workflow import failed
+
+from . import utils, validate
+
+infrastructure_tool = "posthog-infrastructure"
+dns_tool = "posthog-dns"
+ansible_tool = "posthog-ansible"
+
+ROOT = Path(__file__).parent / "resources"
+template_opts = PRESERVE_JINJA_DELIMITERS
+
+
+def tool_dir(opts: dict, tool: str) -> str:
+    return stage_dir(opts, tool, default_profile="posthog")
+
+
+def template(path: str, file: str) -> dict:
+    name = f"tools/{path.replace('.', '/')}/{file}"
+    return {"name": name, "content": (ROOT / name).read_text()}
+
+
+def spec(source: dict, target: str, data: dict) -> dict:
+    return {"template": source, "target": target, "data": data, "opts": template_opts}
+
+
+def raw_spec(target: str, content: str) -> dict:
+    return content_spec(target, content)
+
+
+def cidrs(opts: dict, k: str) -> list[str]:
+    v = opts.get(k)
+    xs = v if isinstance(v, (list, tuple)) else re.split(r"[,\s]+", str("" if v is None else v))
+    return [x for x in (str(item).strip() for item in xs) if x]
+
+
+def credential_env(opts: dict, *slots: str) -> dict[str, str] | None:
+    merged: dict[str, str] = {}
+    for slot in [*slots, "provider-backend"]:
+        merged.update(validate.tofu_env(opts, slot))
+    env = {}
+    for k, env_var in merged.items():
+        v = str(opts.get(k) if opts.get(k) is not None else "")
+        if v:
+            env[env_var] = v
+    return env or None
+
+
+def backend_credential_env(opts: dict) -> dict[str, str] | None:
+    return credential_env(opts)
+
+
+def fallback_params(opts: dict) -> dict:
+    return {"ip": "192.0.2.10", "user": "root", "sudoer": "root",
+            "name": opts.get("profile")}
+
+
+def output_params(result: dict) -> dict | None:
+    return (result.get("tofu/outputs") or {}).get("params")
+
+
+def infrastructure_data(opts: dict) -> dict:
+    return {**opts,
+            "ssh-sources-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-ssh-sources")),
+            "http-sources-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-http-sources"))}
+
+
+def resolved_compute(result: dict, fallback: dict, outputs: dict | None) -> dict:
+    """Refuse to hand 192.0.2.10 to Ansible. That is the documentation address
+    the credential-free build and dry-run paths render with; on a real converge
+    a missing compute output must fail loudly rather than quietly point the
+    whole playbook at TEST-NET."""
+    if outputs and outputs.get("ip"):
+        return {**result, **fallback, **outputs}
+    return {**result, "blue/exit": 1,
+            "blue/err": ("compute produced no ip output; refusing to converge "
+                         "against the documentation address")}
+
+
+async def infrastructure_step(opts: dict) -> dict:
+    dir = tool_dir(opts, infrastructure_tool)
+    specs = [spec(template("infrastructure", "main.tf"), f"{dir}/main.tf",
+                  infrastructure_data(opts))]
+    result = await tofu.tofu_with_spec(opts, specs, dir=dir,
+                                       env=credential_env(opts, "provider-compute"))
+    if failed(result):
+        return result
+    if opts.get("blue/event") == "build":
+        return {**result, **fallback_params(opts)}
+    if opts.get("blue/event") == "delete":
+        return result
+    return resolved_compute(result, fallback_params(opts), output_params(result))
+
+
+def zone_id(zone) -> str:
+    return "${data.cloudflare_zone.zone.id}"
+
+
+def dns_json(opts: dict) -> str:
+    return tofu.constructs_json(
+        [tofu.construct("resource", "cloudflare_dns_record", "posthog",
+                        {"zone_id": zone_id(opts.get("posthog-zone")),
+                         "name": opts.get("posthog-host"),
+                         "content": opts.get("ip"), "type": "A",
+                         # Proxied by default: an unproxied record publishes the
+                         # droplet's address. This was hardcoded true, so a
+                         # cloudflare-proxied key in colors.yml was read by
+                         # nothing and changed nothing -- no effect, no error,
+                         # exit 0. Honour it, and keep the safe value as the
+                         # default. The application trusts forwarded addresses
+                         # through IS_BEHIND_PROXY, so client IPs survive the edge.
+                         "proxied": (bool(opts.get("cloudflare-proxied"))
+                                     if opts.get("cloudflare-proxied") is not None
+                                     else True),
+                         "ttl": 1})])
+
+
+async def dns_step(opts: dict) -> dict:
+    dir = tool_dir(opts, dns_tool)
+    zone = opts.get("posthog-zone") or utils.registrable_domain(opts.get("posthog-host"))
+    data = {**opts,
+            "ip": opts.get("ip") or fallback_params(opts)["ip"],
+            "posthog-zone": zone}
+    specs = [spec(template("dns", "main.tf"), f"{dir}/main.tf", data),
+             raw_spec(f"{dir}/record.tf.json", dns_json(data))]
+    return await tofu.tofu_with_spec(opts, specs, dir=dir,
+                                     env=credential_env(opts, "provider-dns"))
+
+
+def _java_double(x: float) -> str:
+    """Java's Double.toString, which is what Green's cheshire JSON emits for
+    floats: decimal between 1e-3 and 1e7, `d.dddE±e` scientific outside it.
+    Python's own repr disagrees exactly where scientific notation starts
+    (0.0001 -> "1.0E-4"), and the goldens carry the Java form."""
+    if math.isnan(x):
+        return "NaN"
+    if math.isinf(x):
+        return "Infinity" if x > 0 else "-Infinity"
+    negative = math.copysign(1.0, x) < 0
+    magnitude = abs(x)
+    if magnitude == 0.0:
+        return "-0.0" if negative else "0.0"
+    _sign, digits, exponent = Decimal(repr(magnitude)).as_tuple()
+    digit_str = "".join(map(str, digits)).rstrip("0") or "0"
+    dec_exp = exponent + len(digits) - 1
+    if -3 <= dec_exp < 7:
+        if dec_exp >= 0:
+            whole = digit_str[:dec_exp + 1].ljust(dec_exp + 1, "0")
+            frac = digit_str[dec_exp + 1:] or "0"
+        else:
+            whole = "0"
+            frac = "0" * (-dec_exp - 1) + digit_str
+        rendered = f"{whole}.{frac}"
+    else:
+        mantissa = digit_str[0] + "." + (digit_str[1:] or "0")
+        rendered = f"{mantissa}E{dec_exp}"
+    return ("-" if negative else "") + rendered
+
+
+def _pretty(value, indent=0):
+    """Cheshire's pretty JSON, byte for byte — Green's artifact contract."""
+    if isinstance(value, list):
+        if not value:
+            return "[ ]"
+        return "[ " + ", ".join(_pretty(item, indent) for item in value) + " ]"
+    if isinstance(value, dict):
+        if not value:
+            return "{ }"
+        pad = " " * (indent + 2)
+        body = ",\n".join(f"{pad}{json.dumps(str(k))} : {_pretty(v, indent + 2)}"
+                          for k, v in value.items())
+        return "{\n" + body + "\n" + " " * indent + "}"
+    if isinstance(value, float) and not isinstance(value, bool):
+        return _java_double(value)
+    return json.dumps(value)
+
+
+def inventory(opts: dict) -> str:
+    return _pretty(
+        {"all": {"children": {"posthog": {"hosts": {
+            str(opts.get("profile")): {
+                "ansible_host": opts.get("ip") or "192.0.2.10",
+                "ansible_user": "root"}}}}}})
+
+
+def ansible_data(opts: dict) -> dict:
+    return {**opts,
+            "ip": opts.get("ip") or "192.0.2.10",
+            "posthog-web-port": opts.get("posthog-web-port") or 8000,
+            "posthog-backup-access-key":
+                "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID') }}",
+            "posthog-backup-secret-key":
+                "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY') }}"}
+
+
+def ansible_specs(opts: dict) -> list[dict]:
+    dir = tool_dir(opts, ansible_tool)
+    data = ansible_data(opts)
+    return [spec(template("ansible", "ansible.cfg"), f"{dir}/ansible.cfg", data),
+            spec(template("ansible", "main.yml"), f"{dir}/main.yml", data),
+            spec(template("ansible", "cleanup.yml"), f"{dir}/cleanup.yml", data),
+            spec(template("ansible", "compose.yml"), f"{dir}/compose.yml", data),
+            spec(template("ansible", "Caddyfile"), f"{dir}/Caddyfile", data),
+            spec(template("ansible", "backup"), f"{dir}/backup", data),
+            spec(template("ansible", "checkpoint.sql"), f"{dir}/checkpoint.sql", data),
+            spec(template("ansible", "owner.py"), f"{dir}/owner.py", data),
+            raw_spec(f"{dir}/inventory.json", inventory(data))]
+
+
+async def ansible_step(opts: dict) -> dict:
+    dir = tool_dir(opts, ansible_tool)
+    if opts.get("blue/event") == "delete" and not opts.get("ip"):
+        # No compute in state: there is no host to clean up, and the rendered
+        # inventory would fall back to 192.0.2.10. Remove the rendered tree the
+        # way a completed cleanup would and let the teardown continue.
+        return {**scaffold(opts, ansible_specs(opts)),
+                "blue/exit": 0, "posthog/cleanup": "skipped-no-compute"}
+    return await ansible_with_spec(opts, ansible_specs(opts),
+                                   dir=dir, inventory="inventory.json",
+                                   playbooks={"create": "main.yml",
+                                              "delete": "cleanup.yml"},
+                                   host_key_checking=False)
+
+
+# --- Acceptance --------------------------------------------------------------
+#
+# Every claim this step reports must be one it checked. TLS is verified (the
+# previous check passed `curl -k`, so a broken certificate would have gone
+# unnoticed), a captured event is read back out of ClickHouse rather than
+# inferred from a status code, and the backup drill is confirmed by a fresh
+# object in R2 rather than by systemd reporting that it started something.
+
+
+def _parse_long(s) -> int | None:
+    if isinstance(s, str) and re.fullmatch(r"[+-]?\d+", s):
+        return int(s)
+    return None
+
+
+async def http_status(args: list[str]) -> str | None:
+    r = await runtime.exec(
+        ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", *args],
+        timeout_ms=20000)
+    return r.out.strip() if r.exit == 0 else None
+
+
+async def ssh_out(ip, command: str, timeout: int) -> str | None:
+    r = await runtime.exec(
+        ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+         f"root@{ip}", command], timeout_ms=timeout)
+    return r.out.strip() if r.exit == 0 else None
+
+
+async def psql(ip, query: str) -> str | None:
+    out = await ssh_out(ip, "cd /opt/posthog && docker compose exec -T db psql -U posthog"
+                        f" -d posthog -tAc '{query}'", 30000)
+    s = str("" if out is None else out)
+    return s or None
+
+
+async def clickhouse(ip, query: str) -> str | None:
+    """Resolve the events table from system.tables so the check does not
+    hardcode a database name PostHog's migrations own, then run ``query``
+    against it."""
+    out = await ssh_out(ip, "cd /opt/posthog && "
+                        "t=$(docker compose exec -T clickhouse clickhouse-client"
+                        " --query \"SELECT database || '.' || name FROM system.tables"
+                        " WHERE name = 'events' AND database NOT IN ('system')"
+                        " ORDER BY database LIMIT 1\" | tr -d '\\r'); "
+                        "[ -n \"$t\" ] && docker compose exec -T clickhouse clickhouse-client"
+                        f" --query \"{query}\"", 30000)
+    s = str("" if out is None else out)
+    return s or None
+
+
+async def event_count(ip) -> int | None:
+    return _parse_long(await clickhouse(ip, "SELECT count() FROM $t"))
+
+
+async def project_api_key(ip) -> str | None:
+    return await psql(ip, "select api_token from posthog_team order by id limit 1")
+
+
+async def wait_health(url: str, attempts: int) -> bool:
+    n = attempts
+    while True:
+        r = await runtime.exec(["curl", "-fsS", f"{url}/_health/"], timeout_ms=10000)
+        if r.exit == 0:
+            return True
+        if n <= 0:
+            return False
+        await asyncio.sleep(5)
+        n -= 1
+
+
+async def send_event(base: str, api_key: str) -> str | None:
+    return await http_status(
+        ["-X", "POST", "-H", "content-type: application/json",
+         "--data", json.dumps({"api_key": api_key,
+                               "event": "colors_acceptance",
+                               "distinct_id": "colors-acceptance",
+                               "properties": {"source": "colors"}},
+                              separators=(",", ":")),
+         f"{base}/capture/"])
+
+
+def ingestion_verdict(status, before, after) -> str:
+    if status is None:
+        return "unreachable"
+    if (isinstance(before, int) and not isinstance(before, bool)
+            and isinstance(after, int) and not isinstance(after, bool)
+            and after > before):
+        return "ingested"
+    if re.fullmatch(r"2\d\d", str(status)):
+        return "dropped"
+    return "rejected"
+
+
+async def wait_ingested(ip, baseline: int, attempts: int):
+    """Capture is asynchronous through the Celery worker, so poll rather than
+    sampling once."""
+    n = attempts
+    while True:
+        after = await event_count(ip)
+        if isinstance(after, int) and after > baseline:
+            return after
+        if n <= 0:
+            return after
+        await asyncio.sleep(5)
+        n -= 1
+
+
+rclone_env = ("RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare "
+              "RCLONE_CONFIG_R2_REGION=auto RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true")
+
+
+async def backup_listing(opts: dict, ip) -> list[dict] | None:
+    out = await ssh_out(
+        ip, "set -a; . /etc/posthog-backup.env; set +a; " + rclone_env +
+        " RCLONE_CONFIG_R2_ACCESS_KEY_ID=\"$POSTHOG_BACKUP_R2_ACCESS_KEY_ID\""
+        " RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=\"$POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY\""
+        f" RCLONE_CONFIG_R2_ENDPOINT=\"{opts.get('posthog-backup-r2-endpoint')}\""
+        f" rclone lsjson --files-only r2:{opts.get('posthog-backup-r2-bucket')}"
+        f"/{opts.get('profile')}", 120000)
+    if not out:
+        return None
+    return json.loads(out)
+
+
+def parse_instant(s) -> datetime | None:
+    """The port of green's OffsetDateTime parse, which requires an explicit
+    offset and answers nil for anything else."""
+    try:
+        t = datetime.fromisoformat(str(s))
+        return t if t.tzinfo is not None else None
+    except ValueError:
+        return None
+
+
+def fresh_backup(entries, since: datetime) -> bool:
+    if not entries:
+        return False
+    for entry in entries:
+        t = parse_instant(entry.get("ModTime"))
+        if (entry.get("Size") or 0) > 0 and t is not None and t >= since:
+            return True
+    return False
+
+
+async def run_backup(ip) -> str | None:
+    return await ssh_out(
+        ip, "systemctl start posthog-backup.service && systemctl is-active posthog-backup.timer",
+        600000)
+
+
+async def background_jobs(ip) -> str | None:
+    """PostHog's own answers, not ours: whether Celery is alive, and whether any
+    async migration is still pending. A pending one stops the worker starting at
+    all, and the ingestion path this step already exercises never touches Celery
+    -- so background jobs can be entirely dead while capture works."""
+    return await ssh_out(
+        ip, "cd /opt/posthog && docker compose exec -T web python manage.py shell -c "
+        "\"from posthog.utils import is_celery_alive; "
+        "from posthog.models.async_migration import AsyncMigration; "
+        "print('celery=%s pending=%d' % (is_celery_alive(), "
+        "AsyncMigration.objects.exclude(status=2).count()))\"",
+        120000)
+
+
+def background_verdict(out) -> str:
+    s = str("" if out is None else out)
+    if not s.strip():
+        return "unreachable"
+    if not re.search(r"celery=True", s):
+        return "celery-down"
+    if not re.search(r"pending=0\b", s):
+        return "migrations-pending"
+    return "ok"
+
+
+async def acceptance_step(opts: dict) -> dict:
+    if opts.get("blue/event") != "create":
+        return {**opts, "blue/exit": 0}
+    base = f"https://{opts.get('posthog-host')}"
+    ip = opts.get("ip")
+    since = datetime.now(timezone.utc) - timedelta(seconds=120)
+    if not await wait_health(base, 60):
+        return {**opts, "blue/exit": 1,
+                "blue/err": "HTTPS health did not become ready with a valid certificate"}
+    api_key = await project_api_key(ip)
+    before = await event_count(ip)
+    if not (isinstance(before, int) and not isinstance(before, bool)):
+        return {**opts, "blue/exit": 1,
+                "blue/err": "could not read the ClickHouse events table to verify capture"}
+    if not api_key:
+        verdict = "not-configured"
+    else:
+        status = await send_event(base, api_key)
+        after = await wait_ingested(ip, before, 12)
+        verdict = ingestion_verdict(status, before, after)
+    background = background_verdict(await background_jobs(ip))
+    if verdict in ("dropped", "rejected", "unreachable"):
+        return {**opts, "blue/exit": 1,
+                "blue/err": f"synthetic event was not captured: {verdict}"}
+    if background != "ok":
+        return {**opts, "blue/exit": 1,
+                "blue/err": f"background jobs are not healthy: {background}"}
+    if await run_backup(ip) is None:
+        return {**opts, "blue/exit": 1,
+                "blue/err": "backup unit or timer is not healthy"}
+    if not fresh_backup(await backup_listing(opts, ip), since):
+        return {**opts, "blue/exit": 1,
+                "blue/err": ("no backup object newer than this run under r2:"
+                             f"{opts.get('posthog-backup-r2-bucket')}/{opts.get('profile')}")}
+    return {**opts, "blue/exit": 0,
+            "posthog/acceptance": {"health": "ok", "event": verdict,
+                                   "background": "ok",
+                                   "backup": "verified-in-r2"}}

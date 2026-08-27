@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/posthog
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "<{ posthog-backup-dir }>"
+
+# 1. Logical PostgreSQL backup
+docker compose exec -T db pg_dump -U posthog posthog | gzip > "<{ posthog-backup-dir }>/postgres-$stamp.sql.gz"
+
+# 2. ClickHouse's own BACKUP statement produces a consistent archive. Taring the
+#    data directory while the server runs races its merges -- parts vanish
+#    mid-read -- and yields an archive that cannot be restored, so there is
+#    deliberately no fallback here: a failed ClickHouse backup must fail the
+#    whole run. File() destinations must sit under the server's
+#    backups.allowed_path, which is on the bind mount and visible from the host.
+docker compose exec -T -u root clickhouse sh -c 'mkdir -p /var/lib/clickhouse/backups && chown clickhouse:clickhouse /var/lib/clickhouse/backups'
+docker compose exec -T clickhouse clickhouse-client \
+  --query "BACKUP DATABASE default TO File('/var/lib/clickhouse/backups/clickhouse-$stamp.zip')"
+mv "<{ posthog-clickhouse-data-dir }>/backups/clickhouse-$stamp.zip" \
+   "<{ posthog-backup-dir }>/clickhouse-$stamp.zip"
+
+# 3. Offsite synchronization to Cloudflare R2
+RCLONE_CONFIG_R2_TYPE=s3 \
+RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
+RCLONE_CONFIG_R2_REGION=auto \
+RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true \
+RCLONE_CONFIG_R2_ACCESS_KEY_ID="$POSTHOG_BACKUP_R2_ACCESS_KEY_ID" \
+RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY" \
+RCLONE_CONFIG_R2_ENDPOINT="<{ posthog-backup-r2-endpoint }>" \
+rclone copyto "<{ posthog-backup-dir }>/postgres-$stamp.sql.gz" \
+  "r2:<{ posthog-backup-r2-bucket }>/<{ profile }>/postgres-$stamp.sql.gz"
+
+RCLONE_CONFIG_R2_TYPE=s3 \
+RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
+RCLONE_CONFIG_R2_REGION=auto \
+RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true \
+RCLONE_CONFIG_R2_ACCESS_KEY_ID="$POSTHOG_BACKUP_R2_ACCESS_KEY_ID" \
+RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY" \
+RCLONE_CONFIG_R2_ENDPOINT="<{ posthog-backup-r2-endpoint }>" \
+rclone copyto "<{ posthog-backup-dir }>/clickhouse-$stamp.zip" \
+  "r2:<{ posthog-backup-r2-bucket }>/<{ profile }>/clickhouse-$stamp.zip"
+
+# 4. Retention cleanup
+find "<{ posthog-backup-dir }>" -type f \( -name 'postgres-*.sql.gz' -o -name 'clickhouse-*.zip' \) -mtime +<{ posthog-backup-retention-days }> -delete

@@ -1,7 +1,10 @@
 # PostHog Package Skill
 
-A reproducible Green Package Skill for deploying and operating a single-node
-PostHog product analytics suite on DigitalOcean.
+A reproducible tri-colour Package Skill — Clojure/Babashka (green),
+TypeScript/Bun (red), and Python/uv (blue) — for deploying and operating a
+single-node PostHog product analytics suite on DigitalOcean. Green is the
+canonical implementation; red and blue render byte-identical artifacts,
+verified by `scripts/parity.sh`.
 
 ## Architecture
 
@@ -41,7 +44,7 @@ come from one commit, because they share a Postgres schema.
 ```sh
 # Render configuration and OpenTofu/Ansible stages locally. No credentials,
 # no provider calls -- the safe way to check a colors.yml edit.
-./green build
+cd green && ./green build      # or: cd red && ./red build · cd blue && ./blue build
 
 # Walk the DAG, skipping every side effect
 ./green create --dry-run
@@ -65,8 +68,11 @@ capture, and nothing about whether it was stored.
 ## Testing
 
 ```sh
-bb test
-bb golden
+cd green && bb test
+cd green && bb golden
+cd red && bun test && bun run typecheck
+cd blue && uv run pytest
+./scripts/parity.sh
 ./scripts/launcher.sh
 ```
 
