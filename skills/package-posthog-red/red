@@ -36,7 +36,7 @@ import { homedir } from "node:os";
 // directory, which would halt Bun's upward resolution of `package-posthog-red`
 // and break the development symlink at red/red.
 const PINS = {
-  "package-posthog-red": "github:getcolors/posthog#ce05ed2572d80a215c5dcf95e0422ec926916b16",
+  "package-posthog-red": "github:getcolors/posthog#eb4b8559598c6dea9d681d7d8ddf4e654593ee77",
   "package-once-red": "github:getcolors/once#eea43c2fe0d8c1d45d07ccfee41edc81ea4c7c6e",
   "red": "github:getcolors/red#db9bfe61282e2093f4098bf5a6ee0cd10added6e",
 };
