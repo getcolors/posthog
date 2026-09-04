@@ -4,7 +4,7 @@
 # dependencies = ["package-posthog-blue", "blue", "package-once-blue"]
 #
 # [tool.uv.sources]
-# package-posthog-blue = { git = "https://github.com/getcolors/posthog.git", rev = "8a8481acfc6fc1d30f86f9d4da8da796c16ef20c", subdirectory = "blue" }
+# package-posthog-blue = { git = "https://github.com/getcolors/posthog.git", rev = "6a555cf1c837195dd0c0e55b08e7ac9ec4fbb39a", subdirectory = "blue" }
 # blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
 # package-once-blue = { git = "https://github.com/getcolors/once.git", subdirectory = "blue", rev = "38e3cd66674a32fb96605e1b17ae6791086ad5c1" }
 #
