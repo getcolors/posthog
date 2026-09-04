@@ -38,14 +38,21 @@
       (is (= "58495393" (:digitalocean-ssh-keys result)))
       (is (nil? (:ssh-keygen result))))))
 
+(defn- start-with-no-state
+  "A real event on a fresh deployment: the state read finds nothing recorded.
+  Stubbed, so the validators under test never run `tofu output`."
+  [opts]
+  (with-redefs [workflow/state-output (fn [_] nil)]
+    (workflow/start-step opts {})))
+
 (deftest real-create-requires-credentials
-  (let [r (workflow/start-step (assoc (fixture) :green/event :create) {})]
+  (let [r (start-with-no-state (assoc (fixture) :green/event :create))]
     (is (= 2 (:green/exit r)))
     (is (str/includes? (:green/err r) "COLORS_PAR_DO_TOKEN"))
     (is (str/includes? (:green/err r) "COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY"))))
 
 (deftest delete-is-protected
-  (let [r (workflow/start-step (assoc (fixture) :green/event :delete) {})]
+  (let [r (start-with-no-state (assoc (fixture) :green/event :delete))]
     (is (= 2 (:green/exit r)))
     (is (str/includes? (:green/err r) "COMPUTE_PREVENT_DESTROY"))))
 
@@ -67,8 +74,11 @@
   ;; Swallowing a failed state read is how a live teardown ended up pointing
   ;; the cleanup playbook at 192.0.2.10: stale backend credentials made
   ;; `tofu output` fail, nil was merged, and the inventory fell back to
-  ;; TEST-NET. The failure must surface here, before any playbook runs.
-  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {})))]
+  ;; TEST-NET. The failure must surface here, before any playbook runs. The
+  ;; stubs throw the shape `green.tofu/outputs` throws — an ex-info carrying
+  ;; `:dir` — because only that is an unreadable backend; anything else
+  ;; propagates as a defect.
+  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {:dir "x"})))]
     (let [r (workflow/start-step (deletable-fixture :green/event :delete) {})]
       (is (= 1 (:green/exit r)))
       (is (str/includes? (:green/err r) "Unauthorized"))
@@ -78,7 +88,7 @@
   ;; COLORS_PAR_IP replaces a stale recorded address once the read succeeded;
   ;; it is not a way around the read, the fail-closed rule, or the provider
   ;; guard (Compute Provider Standard §4).
-  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {})))]
+  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {:dir "x"})))]
     (let [r (workflow/start-step (deletable-fixture :green/event :delete :ip "203.0.113.7") {})]
       (is (= 1 (:green/exit r)))
       (is (str/includes? (:green/err r) "Unauthorized"))))
@@ -148,7 +158,7 @@
           (is (= [[:ensure nil] :preflight :ssh-config] @calls))
           (is (true? (:ssh-keygen r)) "the real key path is filled for the templates"))))
     (testing "an unreadable backend counts as no state on a create"
-      (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {})))
+      (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {:dir "x"})))
                     ssh/ensure-key! (fn [opts state-fn] (assoc opts ::state (state-fn opts)))
                     ssh/preflight! identity
                     ssh-config/preflight! identity]
@@ -249,7 +259,7 @@
         (is (str/includes? (:green/err r) "set provider-compute back to digitalocean"))))))
 
 (deftest unreadable-backend-is-no-state-on-create-and-fatal-on-delete
-  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {})))
+  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {:dir "x"})))
                 ssh/ensure-key! (fn [opts state-fn] (assoc opts ::state (state-fn opts)))
                 ssh/preflight! identity ssh-config/preflight! identity]
     (doseq [f [fixture vultr]]
@@ -262,7 +272,7 @@
         (is (str/includes? (:green/err r) "Unauthorized"))))))
 
 (deftest real-create-requires-the-selected-provider-credentials
-  (let [r (workflow/start-step (assoc (vultr) :green/event :create) {})]
+  (let [r (start-with-no-state (assoc (vultr) :green/event :create))]
     (is (= 2 (:green/exit r)))
     (is (str/includes? (:green/err r) "COLORS_PAR_VULTR_API_KEY"))
     (is (not (str/includes? (:green/err r) "COLORS_PAR_DO_TOKEN")))))

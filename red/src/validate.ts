@@ -7,14 +7,15 @@
 
 import { parName } from "red/cli";
 import type { Opts } from "red/workflow";
-import { providers } from "package-once-red";
+import { compute, providers } from "package-once-red";
 import { onceSsh } from "./once.ts";
 
 export { providers };
 
 export const profilePar = parName("profile");
 
-interface ProviderEntry {
+// The shape of a state-backend registry entry in ONCE's `providers`.
+interface BackendEntry {
   required?: string[];
   secrets?: string[];
   tofuEnv?: Record<string, string>;
@@ -37,7 +38,7 @@ interface ProviderEntry {
 // default and the key is only an override. Requiring either would make
 // conforming deployments invalid. Keys of an unselected provider are accepted
 // and ignored, so one colors.yml stays portable.
-export const computeProviders: Record<string, ProviderEntry> = {
+export const computeProviders: compute.Registry = {
   digitalocean: {
     required: ["digitalocean-region", "digitalocean-size", "digitalocean-image",
                "digitalocean-ssh-sources", "digitalocean-http-sources"],
@@ -57,6 +58,17 @@ export const computeProviders: Record<string, ProviderEntry> = {
 // provider this package had.
 export const defaultComputeProvider = "digitalocean";
 
+// How this package describes itself to ONCE's `compute`, the Compute Provider
+// Standard's operations over a package-owned registry. The registry and the
+// default are the data above; `sources` names the firewall lists the templates
+// read — SSH must list at least one CIDR, an empty HTTP list means no public
+// HTTP. The name rules are ONCE's.
+export const spec: compute.ComputeSpec = {
+  registry: computeProviders,
+  default: defaultComputeProvider,
+  sources: { nonEmpty: ["ssh-sources"], mayBeEmpty: ["http-sources"] },
+};
+
 export const required = [
   "profile", "workdir", "provider-compute", "provider-dns", "provider-backend",
   "compute-prevent-destroy", "posthog-host", "posthog-admin-email", "posthog-image",
@@ -74,16 +86,6 @@ const hostRe = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-
 // pin that cannot move under the deployment, so validation must accept it.
 const imageRe = /^[^\s:@]+(?:\/[^\s:@]+)*(?::[^\s:@]+|(?::[^\s:@]+)?@sha256:[0-9a-f]{64})$/;
 
-// Provider naming rules for the compute name override. DigitalOcean droplet
-// names are hostname-like: lowercase letters, digits, dots and hyphens, up to
-// 63 characters, starting and ending alphanumeric. Vultr labels are only a
-// console string: letters of either case, digits, dot, underscore and hyphen,
-// up to 63 characters.
-const computeNameRes: Record<string, RegExp> = {
-  digitalocean: /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/,
-  vultr: /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/,
-};
-
 export const imageKeys = [
   "posthog-image", "posthog-postgres-image", "posthog-clickhouse-image",
   "posthog-redis-image", "posthog-kafka-image", "posthog-temporal-image", "posthog-capture-image", "posthog-plugin-server-image", "caddy-image",
@@ -93,30 +95,16 @@ export function missing(x: unknown): boolean {
   return x == null || (typeof x === "string" && !x.trim());
 }
 
-// Absent, blank or REPLACE_ME all mean 'use the profile' (Compute Name
-// Standard §2: presence is the only switch).
-export function placeholder(value: unknown): boolean {
-  return missing(value) || String(value).trim() === "REPLACE_ME";
-}
+// `<provider>-<suffix>`: desired state names compute keys after the provider,
+// so the shared steps reach them through the selected provider rather than a
+// fixed prefix. ONCE's; named here so `tools` reads the same.
+export const computeKey = compute.computeKey;
 
-export function computeProvider(opts: Opts): ProviderEntry | undefined {
-  return computeProviders[String(opts["provider-compute"])];
-}
-
-// The selected provider's key for `suffix`: `digitalocean-ssh-sources`,
-// `vultr-name`, and so on. Provider keys stay provider-scoped so an existing
-// colors.yml keeps meaning what it meant.
-export function computeKey(opts: Opts, suffix: string): string {
-  return `${opts["provider-compute"]}-${suffix}`;
-}
-
-// What this deployment calls its machine. The one function that answers it —
-// every label, including the firewall's, derives from this and never from the
-// raw override key or a second copy of the profile (§3).
-export function computeName(opts: Opts): string {
-  const override = opts[computeKey(opts, "name")];
-  return placeholder(override) ? String(opts.profile ?? "") : String(override).trim();
-}
+// What this deployment calls its machine: `<provider>-name` when present, else
+// the profile (Compute Name Standard). ONCE's; every label, including the
+// firewall's, derives from this one answer and never from the raw override key
+// or a second copy of the profile (§3).
+export const computeName = compute.computeName;
 
 // Whether this deployment owns its machine keypair. Delegates to ONCE, the
 // standard's reference implementation, so one rule decides it everywhere.
@@ -134,110 +122,18 @@ function positiveInt(x: unknown): boolean {
   return typeof x === "number" && Number.isInteger(x) && x > 0;
 }
 
-// --- CIDR syntax (Compute Provider Standard §5) ------------------------------
-//
-// Hand-rolled rather than delegated to a runtime library so the three colours
-// accept exactly the same set of strings: an address that one colour's parser
-// tolerates and another's rejects would be a parity bug at the firewall.
+// A source list as desired state or an overlay string carries it. ONCE's, so
+// the validator and the templates can never disagree about what an entry is.
+export const cidrs = compute.cidrs;
 
-function ipv4Address(s: string): boolean {
-  const parts = s.split(".");
-  return parts.length === 4 &&
-    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
-}
-
-function ipv6Address(s: string): boolean {
-  const halves = s.split("::");
-  const groups = (half: string) => (half === "" ? [] : half.split(":"));
-  const hexGroup = (g: string) => /^[0-9A-Fa-f]{1,4}$/.test(g);
-  // An embedded dotted quad may close the address: ::ffff:192.0.2.10.
-  const embedded = (gs: string[]) => gs.length > 0 && ipv4Address(gs[gs.length - 1]!);
-  const countGroups = (gs: string[]) => (embedded(gs) ? gs.length + 1 : gs.length);
-  const wellFormed = (gs: string[]) => (embedded(gs) ? gs.slice(0, -1) : gs).every(hexGroup);
-  if (halves.length === 1) {
-    const gs = groups(s);
-    return wellFormed(gs) && countGroups(gs) === 8;
-  }
-  if (halves.length === 2) {
-    const a = groups(halves[0]!);
-    const b = groups(halves[1]!);
-    return wellFormed(a) && wellFormed(b) && !embedded(a) &&
-      countGroups(a) + countGroups(b) < 8;
-  }
-  return false;
-}
-
-// Whether `s` is a syntactically valid IPv4 or IPv6 CIDR: an address, a slash,
-// and a prefix length within the family's range.
-export function cidr(s: unknown): boolean {
-  const parts = String(s).split("/");
-  if (parts.length !== 2) return false;
-  const [addr, prefix] = parts as [string, string];
-  if (!/^\d{1,3}$/.test(prefix)) return false;
-  const n = Number(prefix);
-  return (ipv4Address(addr) && n <= 32) || (ipv6Address(addr) && n <= 128);
-}
-
-// The entries of a source list, whether desired state supplied a YAML list or
-// an overlay string.
-export function cidrList(v: unknown): string[] {
-  const xs = Array.isArray(v) ? v : String(v ?? "").split(/[,\s]+/);
-  return xs.map((x) => String(x).trim()).filter((x) => x.length > 0);
-}
-
-// The network contract: `<provider>-ssh-sources` must reach someone, and every
-// entry of both lists must be a CIDR — before any provider call. An empty
-// `<provider>-http-sources` is allowed and means no public HTTP.
-function sourceErrors(opts: Opts): string[] {
-  if (!computeProvider(opts)) return [];
-  const sshKey = computeKey(opts, "ssh-sources");
-  const httpKey = computeKey(opts, "http-sources");
-  const errors: string[] = [];
-  if (!missing(opts[sshKey]) && cidrList(opts[sshKey]).length === 0) {
-    errors.push(`:${sshKey} must list at least one CIDR; an empty list is a machine no one can reach`);
-  }
-  for (const key of [sshKey, httpKey]) {
-    if (missing(opts[key])) continue;
-    for (const entry of cidrList(opts[key])) {
-      if (!cidr(entry)) errors.push(`:${key} entry is not an IPv4 or IPv6 CIDR: ${entry}`);
-    }
-  }
-  return errors;
-}
-
-// Checks that only make sense for the selected provider. Keys of an unselected
-// provider are never read.
-function providerErrors(opts: Opts): string[] {
-  const errors: string[] = [];
-  switch (opts["provider-compute"]) {
-    case "digitalocean":
-      if ("digitalocean-vpc-uuid" in opts) {
-        errors.push(":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime");
-      }
-      if ("digitalocean-vpc-cidr" in opts) {
-        errors.push(":digitalocean-vpc-cidr must be absent; this package must not create a VPC");
-      }
-      break;
-    case "vultr": {
-      const osId = opts["vultr-os-id"];
-      if (!(missing(osId) || (typeof osId === "number" && Number.isInteger(osId)))) {
-        errors.push(":vultr-os-id must be Vultr's numeric operating-system id");
-      }
-      break;
-    }
-    default:
-      break;
-  }
-  return errors;
-}
-
+// Every problem with desired state at once: the missing keys (this package's
+// and the selected provider's), the package's own checks, then the Compute
+// Provider Standard's — selection, the network contract and the provider
+// rules — which are ONCE's over `spec`.
 export function stateErrors(opts: Opts): string[] {
   const errors: string[] = [];
-  for (const k of [...required, ...(computeProvider(opts)?.required ?? [])]) {
+  for (const k of [...required, ...compute.requiredKeys(spec, opts)]) {
     if (missing(opts[k])) errors.push(`:${k} is required`);
-  }
-  if (!computeProvider(opts)) {
-    errors.push(`:provider-compute must be one of ${Object.keys(computeProviders).sort().join(", ")}`);
   }
   if (opts["provider-dns"] !== "cloudflare") {
     errors.push(":provider-dns must be cloudflare");
@@ -262,34 +158,12 @@ export function stateErrors(opts: Opts): string[] {
       errors.push(`:${k} must be a positive integer`);
     }
   }
-  const nameRe = computeNameRes[String(opts["provider-compute"])];
-  if (nameRe && !(placeholder(opts[computeKey(opts, "name")]) || nameRe.test(computeName(opts)))) {
-    errors.push(`:${computeKey(opts, "name")} must be a valid ${opts["provider-compute"]} machine name`);
-  }
-  errors.push(...sourceErrors(opts));
-  errors.push(...providerErrors(opts));
+  errors.push(...compute.stateErrors(spec, opts));
   return errors;
 }
 
-// Provider switching is a rebuild, never an apply (Compute Provider Standard
-// §4). All providers share one state key, so a changed provider-compute on a
-// profile with compute in state would plan a cross-provider replacement.
-// `recorded` is the compute stage's applied `params` (undefined when no state
-// is readable): a recorded provider that differs from the selected one
-// refuses, and params without a provider — a deployment created before
-// adoption — are accepted only for the package default. Pure, so the read
-// stays with the lifecycle and the rule is testable without a backend.
-export function providerStateErrors(opts: Opts, recorded: Opts | undefined): string[] {
-  if (!recorded) return [];
-  const selected = opts["provider-compute"];
-  const held = String(recorded.provider ?? "") || defaultComputeProvider;
-  return held === selected
-    ? []
-    : [`state holds a ${held} machine; set provider-compute back to ${held} and delete first`];
-}
-
-function backendEntry(opts: Opts): ProviderEntry | undefined {
-  return (providers as Record<string, Record<string, ProviderEntry>>)["provider-backend"]?.[String(opts["provider-backend"])];
+function backendEntry(opts: Opts): BackendEntry | undefined {
+  return (providers as Record<string, Record<string, BackendEntry>>)["provider-backend"]?.[String(opts["provider-backend"])];
 }
 
 export function backendSecrets(opts: Opts): string[] {
@@ -297,7 +171,7 @@ export function backendSecrets(opts: Opts): string[] {
 }
 
 export function secretErrors(opts: Opts): string[] {
-  const keys = [...(computeProvider(opts)?.secrets ?? []),
+  const keys = [...compute.secrets(spec, opts),
     "cloudflare-api-token",
     // The compose template interpolates these at run time and
     // carries no fallback; the Django signing key in
@@ -316,7 +190,7 @@ export function secretErrors(opts: Opts): string[] {
 
 export function tofuEnv(opts: Opts, slot: string): Record<string, string> {
   switch (slot) {
-    case "provider-compute": return computeProvider(opts)?.tofuEnv ?? {};
+    case "provider-compute": return compute.tofuEnv(spec, opts);
     case "provider-dns": return { "cloudflare-api-token": "CLOUDFLARE_API_TOKEN" };
     case "provider-backend": return backendEntry(opts)?.tofuEnv ?? {};
     default: return {};

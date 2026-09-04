@@ -17,6 +17,7 @@ from blue.cli import stage_dir
 from blue.runtime import runtime
 from blue.scaffold import PRESERVE_JINJA_DELIMITERS, content_spec, scaffold
 from blue.workflow import failed
+from package_once_blue import compute as once_compute
 
 from . import ssh, ssh_config, utils, validate
 
@@ -47,7 +48,7 @@ def raw_spec(target: str, content: str) -> dict:
 
 
 def cidrs(opts: dict, k: str) -> list[str]:
-    return validate.cidr_list(opts.get(k))
+    return validate.cidrs(opts, k)
 
 
 def credential_env(opts: dict, *slots: str) -> dict[str, str] | None:
@@ -66,13 +67,10 @@ def backend_credential_env(opts: dict) -> dict[str, str] | None:
     return credential_env(opts)
 
 
-def fallback_params(opts: dict) -> dict:
-    return {"ip": "192.0.2.10", "user": "root", "sudoer": "root",
-            "name": validate.compute_name(opts)}
-
-
-def output_params(result: dict) -> dict | None:
-    return (result.get("tofu/outputs") or {}).get("params")
+# What `build` and `--dry-run` render in place of a compute output: the
+# documentation address, shaped like the selected provider's real `params` so
+# every later stage sees the same keys either way. ONCE's.
+fallback_params = once_compute.fallback_params
 
 
 def infrastructure_data(opts: dict) -> dict:
@@ -99,16 +97,9 @@ def infrastructure_template(opts: dict) -> dict:
     return template(f"infrastructure.{opts.get('provider-compute')}", "main.tf")
 
 
-def resolved_compute(result: dict, fallback: dict, outputs: dict | None) -> dict:
-    """Refuse to hand 192.0.2.10 to Ansible. That is the documentation address
-    the credential-free build and dry-run paths render with; on a real converge
-    a missing compute output must fail loudly rather than quietly point the
-    whole playbook at TEST-NET."""
-    if outputs and outputs.get("ip"):
-        return {**result, **fallback, **outputs}
-    return {**result, "blue/exit": 1,
-            "blue/err": ("compute produced no ip output; refusing to converge "
-                         "against the documentation address")}
+# Refuse to hand 192.0.2.10 to Ansible on a real converge whose compute output
+# carries no `ip`. ONCE's; `infrastructure_step` is what wires it.
+resolved_compute = once_compute.resolved_compute
 
 
 async def infrastructure_step(opts: dict) -> dict:
@@ -123,7 +114,7 @@ async def infrastructure_step(opts: dict) -> dict:
         return {**result, **fallback_params(opts)}
     if opts.get("blue/event") == "delete":
         return result
-    return resolved_compute(result, fallback_params(opts), output_params(result))
+    return resolved_compute(result, fallback_params(opts), once_compute.output_params(result))
 
 
 def zone_id(zone) -> str:

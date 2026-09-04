@@ -24,7 +24,7 @@
        "# [tool.uv.sources]\n"
        "# package-posthog-blue = { git = \"https://github.com/getcolors/posthog.git\", rev = \"" sha "\", subdirectory = \"blue\" }\n"
        "# blue = { git = \"https://github.com/getcolors/blue.git\", rev = \"290f313ead5ca162875c33a049c880da017eae09\" }\n"
-       "# package-once-blue = { git = \"https://github.com/getcolors/once.git\", subdirectory = \"blue\", rev = \"759eb0311b4bdf881eab813cfe5d00f76b9310cc\" }\n"
+       "# package-once-blue = { git = \"https://github.com/getcolors/once.git\", subdirectory = \"blue\", rev = \"eea43c2fe0d8c1d45d07ccfee41edc81ea4c7c6e\" }\n"
        "#\n"
        ;; package-once-blue carries its own, older blue pin; the override makes
        ;; this package's blue pin win, as it does in blue/pyproject.toml.

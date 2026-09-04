@@ -50,7 +50,8 @@
 
 (deftest fallback-params-are-the-documentation-address-on-every-provider
   (doseq [f [fixture vultr]]
-    (is (= {:ip "192.0.2.10" :user "root" :sudoer "root" :name (:profile (f))}
+    (is (= {:provider (:provider-compute (f)) :ip "192.0.2.10" :user "root" :sudoer "root"
+            :name (:profile (f))}
            (tools/fallback-params (f)))))
   ;; `name` is the resolved compute name, as the templates' params output is.
   (is (= "analytics-1" (:name (tools/fallback-params (fixture :digitalocean-name "analytics-1")))))

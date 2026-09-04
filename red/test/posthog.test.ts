@@ -41,7 +41,10 @@ const secrets: Opts = {
   "r2-access-key-id": "k", "r2-secret-access-key": "s",
 };
 
-// A stubbed `tofu output`: the recorded params, or a failed read.
+// A stubbed `tofu output`: the recorded params, or a failed read. The failed
+// read is a non-zero exit, which `red/tofu` throws as the SDK's `StepError` —
+// the one shape ONCE's `readState` counts as an unreadable backend; anything
+// else propagates as a defect.
 function stateOutputs(params: Opts | undefined) {
   runtime.exec = async () => params === undefined
     ? { exit: 1, out: "", err: "Unauthorized" }
@@ -139,7 +142,8 @@ describe("tools", () => {
 
   test("fallback params are the documentation address on every provider", () => {
     for (const f of [fixture, vultr]) {
-      expect(tools.fallbackParams(f())).toEqual({ ip: "192.0.2.10", user: "root", sudoer: "root", name: f().profile });
+      expect(tools.fallbackParams(f())).toEqual({ provider: f()["provider-compute"], ip: "192.0.2.10",
+        user: "root", sudoer: "root", name: f().profile });
     }
     // `name` is the resolved compute name, as the templates' params output is.
     expect(tools.fallbackParams(fixture({ "digitalocean-name": "analytics-1" })).name).toBe("analytics-1");
@@ -607,6 +611,29 @@ describe("validate", () => {
     expect(validate.defaultComputeProvider).toBe("digitalocean");
   });
 
+  test("the spec carries this package's registry, sources and default", () => {
+    // The operations are ONCE's; this is the data they run over. A colour
+    // whose registry, sources or default drifts fails here, in that colour.
+    expect(Object.keys(validate.spec.registry).sort()).toEqual(["digitalocean", "vultr"]);
+    expect(validate.spec.registry).toBe(validate.computeProviders);
+    expect(validate.spec.registry.digitalocean).toEqual({
+      required: ["digitalocean-region", "digitalocean-size", "digitalocean-image",
+                 "digitalocean-ssh-sources", "digitalocean-http-sources"],
+      secrets: ["do-token"],
+      tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
+    });
+    expect(validate.spec.registry.vultr).toEqual({
+      required: ["vultr-region", "vultr-plan", "vultr-os-id", "vultr-ssh-sources", "vultr-http-sources"],
+      secrets: ["vultr-api-key"],
+      tofuEnv: { "vultr-api-key": "VULTR_API_KEY" },
+    });
+    expect(validate.spec.sources).toEqual({ nonEmpty: ["ssh-sources"], mayBeEmpty: ["http-sources"] });
+    expect(validate.spec.default).toBe("digitalocean");
+    expect(validate.spec.default).toBe(validate.defaultComputeProvider);
+    // The name rules are ONCE's.
+    expect(validate.spec.nameRules).toBeUndefined();
+  });
+
   test("unsupported provider is named with the alternatives", () => {
     expect(validate.stateErrors(fixture({ "provider-compute": "hcloud" })))
       .toContain(":provider-compute must be one of digitalocean, vultr");
@@ -626,13 +653,6 @@ describe("validate", () => {
     expect(doErrors.some((e) => e.includes("vultr"))).toBe(false);
     // Unselected-provider keys are accepted so one colors.yml stays portable.
     expect(validate.stateErrors(fixture({ "vultr-region": "ams", "vultr-ssh-keys": "x" }))).toEqual([]);
-  });
-
-  test("per-provider checks run only for the selected provider", () => {
-    expect(validate.stateErrors(vultr({ "vultr-os-id": "2284" })).some((e) => e.includes("vultr-os-id"))).toBe(true);
-    expect(validate.stateErrors(fixture({ "vultr-os-id": "2284" }))).toEqual([]);
-    expect(validate.stateErrors(fixture({ "digitalocean-vpc-uuid": "x" })).some((e) => e.includes("vpc-uuid"))).toBe(true);
-    expect(validate.stateErrors(vultr({ "digitalocean-vpc-uuid": "x" }))).toEqual([]);
   });
 
   test("secrets and tofu env follow the selected provider", () => {
@@ -658,60 +678,25 @@ describe("validate", () => {
     expect(validate.computeName(vultrOptout())).toBe("posthog-vultr-optout");
     expect(validate.computeName(vultr({ "digitalocean-name": "other" }))).toBe("posthog-vultr-fixture");
     expect(validate.stateErrors(vultr({ "vultr-name": "not valid!" })).some((e) => e.includes("vultr-name"))).toBe(true);
-    // Provider-specific rules: DigitalOcean names are hostname-like, Vultr
-    // labels are only a console string.
-    expect(validate.stateErrors(fixture({ "digitalocean-name": "invalid_name" })).some((e) => e.includes("digitalocean-name"))).toBe(true);
-    expect(validate.stateErrors(fixture({ "digitalocean-name": "Upper-Case" })).some((e) => e.includes("digitalocean-name"))).toBe(true);
-    expect(validate.stateErrors(vultr({ "vultr-name": "invalid_name" }))).toEqual([]);
-    expect(validate.stateErrors(vultr({ "vultr-name": "Upper_Case.1" }))).toEqual([]);
   });
 
   // --- the network contract (§5)
-
-  test("cidr syntax", () => {
-    for (const ok of ["0.0.0.0/0", "10.0.0.0/8", "203.0.113.7/32", "::/0", "2001:db8::/32",
-                      "fe80::1/128", "::ffff:192.0.2.10/96", "2001:db8:0:0:0:0:0:1/64"]) {
-      expect(validate.cidr(ok)).toBe(true);
-    }
-    for (const bad of ["", "10.0.0.0", "10.0.0.0/33", "256.0.0.1/8", "10.0.0/8", "::/129",
-                       "2001:db8::/-1", "2001:db8:::1/64", "1:2:3:4:5:6:7:8:9/64", "g::1/64",
-                       "10.0.0.0/8/8", "example.com/24"]) {
-      expect(validate.cidr(bad)).toBe(false);
-    }
-  });
 
   test("ssh sources must reach someone and malformed entries are refused in either list", () => {
     for (const f of [fixture, vultr]) {
       const opts = f();
       const sshKey = validate.computeKey(opts, "ssh-sources");
       const httpKey = validate.computeKey(opts, "http-sources");
-      expect(validate.stateErrors({ ...opts, [sshKey]: [] }).some((e) => e.includes("at least one CIDR"))).toBe(true);
-      expect(validate.stateErrors({ ...opts, [sshKey]: ["10.0.0.0"] })
-        .some((e) => e.includes("not an IPv4 or IPv6 CIDR: 10.0.0.0"))).toBe(true);
-      expect(validate.stateErrors({ ...opts, [httpKey]: ["0.0.0.0/0", "nope"] })
-        .some((e) => e.includes("not an IPv4 or IPv6 CIDR: nope"))).toBe(true);
+      expect(validate.stateErrors({ ...opts, [sshKey]: [] })).toContain(`:${sshKey} must list at least one CIDR`);
+      expect(validate.stateErrors({ ...opts, [sshKey]: ["10.0.0.0"] }))
+        .toContain(`:${sshKey} entry "10.0.0.0" is not an IPv4 or IPv6 CIDR`);
+      expect(validate.stateErrors({ ...opts, [httpKey]: ["0.0.0.0/0", "nope"] }))
+        .toContain(`:${httpKey} entry "nope" is not an IPv4 or IPv6 CIDR`);
       // An empty http list means no public HTTP and is allowed.
       expect(validate.stateErrors({ ...opts, [httpKey]: [] })).toEqual([]);
       // Overlay strings are split the way the template reads them.
       expect(validate.stateErrors({ ...opts, [sshKey]: "10.0.0.0/8, 192.0.2.0/24" })).toEqual([]);
     }
-  });
-
-  // --- provider switching is a rebuild (§4)
-
-  test("provider state refuses a switch, accepts the recorded provider, and holds legacy params to the default", () => {
-    expect(validate.providerStateErrors(fixture(), { provider: "vultr", ip: "203.0.113.7" }))
-      .toEqual(["state holds a vultr machine; set provider-compute back to vultr and delete first"]);
-    expect(validate.providerStateErrors(vultr(), { provider: "digitalocean", ip: "203.0.113.7" }))
-      .toEqual(["state holds a digitalocean machine; set provider-compute back to digitalocean and delete first"]);
-    expect(validate.providerStateErrors(fixture(), { provider: "digitalocean", ip: "203.0.113.7" })).toEqual([]);
-    expect(validate.providerStateErrors(vultr(), { provider: "vultr", ip: "203.0.113.7" })).toEqual([]);
-    expect(validate.providerStateErrors(fixture(), undefined)).toEqual([]);
-    expect(validate.providerStateErrors(vultr(), undefined)).toEqual([]);
-    // Every deployment created before adoption ran the package default.
-    expect(validate.providerStateErrors(fixture(), { ip: "203.0.113.7" })).toEqual([]);
-    expect(validate.providerStateErrors(vultr(), { ip: "203.0.113.7" }))
-      .toEqual(["state holds a digitalocean machine; set provider-compute back to digitalocean and delete first"]);
   });
 
   test("the machine key is not required", () => {
@@ -800,15 +785,19 @@ describe("workflow", () => {
       fixture({ "red/event": "create", "red/dry-run": true }), {}))["red/exit"]).toBe(0);
   });
 
+  // A real event on a fresh deployment: the state read finds nothing recorded.
+  // Injected, so the validators under test never run `tofu output`.
+  const noState = async () => undefined;
+
   test("real create requires credentials", async () => {
-    const r = await workflow.startStep(fixture({ "red/event": "create" }), {});
+    const r = await workflow.startStep(fixture({ "red/event": "create" }), {}, noState);
     expect(r["red/exit"]).toBe(2);
     expect(String(r["red/err"])).toContain("COLORS_PAR_DO_TOKEN");
     expect(String(r["red/err"])).toContain("COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY");
   });
 
   test("delete is protected", async () => {
-    const r = await workflow.startStep(fixture({ "red/event": "delete" }), {});
+    const r = await workflow.startStep(fixture({ "red/event": "delete" }), {}, noState);
     expect(r["red/exit"]).toBe(2);
     expect(String(r["red/err"])).toContain("COMPUTE_PREVENT_DESTROY");
   });
@@ -950,7 +939,7 @@ describe("workflow", () => {
   });
 
   test("a real create requires the selected provider credentials", async () => {
-    const r = await workflow.startStep(vultr({ "red/event": "create" }), {});
+    const r = await workflow.startStep(vultr({ "red/event": "create" }), {}, noState);
     expect(r["red/exit"]).toBe(2);
     expect(String(r["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
     expect(String(r["red/err"])).not.toContain("COLORS_PAR_DO_TOKEN");

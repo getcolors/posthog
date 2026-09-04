@@ -47,8 +47,37 @@ refuses a mismatch — before provider-secret validation, and pre-empting it, so
 a mistaken edit reports `state holds a <recorded> machine; set
 provider-compute back to <recorded> and delete first` rather than a missing
 token for the new provider. Params without a provider (a deployment created
-before adoption) are held to `digitalocean`. An unreadable backend is no state
-on a create and, through `adopt-state`, fatal on a delete.
+before adoption) are held to `digitalocean`, and any other selection is
+refused with `state holds a machine with no recorded provider … which makes
+it a digitalocean machine; set provider-compute back to digitalocean and
+delete first`. An unreadable backend is no state on a create and, through
+`adopt-state`, fatal on a delete.
+
+The operations behind all of that are not this package's code. Since the
+delegation, ONCE's `compute` namespace (`io.github.getcolors.once.compute`,
+the `compute` export of `package-once-red`, `package_once_blue.compute`)
+implements the Compute Provider Standard: selection, the CIDR grammar and the
+network contract, the name rules (checked on the *resolved* name, profile or
+override), the switch and legacy-state refusals, the missing-`ip` refusal,
+the state read and its adoption. What lives here is the data and the wiring —
+the registry, the default provider, the `spec` value in each colour's
+`validate` that hands both plus the sources map to ONCE, the templates, the
+fixtures and goldens, `state-output`, and the `start-step` preflight that
+calls ONCE's functions in the order above. `compute-name`, `compute-key`,
+`cidrs`, `fallback-params` and `resolved-compute` remain as package-named
+aliases so `tools` and the tests read as before. One thing is posthog's own
+and deliberately not ONCE's: the `adopt-state` wrapper that applies the
+`COLORS_PAR_IP` override after ONCE's adoption succeeded, so no other package
+gains a way to point a delete's cleanup at an arbitrary host. The
+pure-function matrix (CIDR table, name rules, per-provider checks, the switch
+rules) is tested in ONCE, in all three colours and by its parity drivers;
+this repository tests the wiring — one test per safety boundary through
+`start-step` — and one spec-content test per colour, so a colour whose spec
+drifts fails in that colour. The delegation also replaced posthog's own
+wording: the CIDR errors are now ONCE's `:<key> must list at least one CIDR`
+and `:<key> entry "<entry>" is not an IPv4 or IPv6 CIDR`, and the legacy
+state above is refused with ONCE's two-clause message rather than the plain
+switch message.
 
 There are four fixtures — one per provider per keypair mode —
 `test/fixtures/colors.yml` (`posthog-fixture`), `optout.yml`
@@ -88,15 +117,19 @@ dry-run that fell through to the real path would read `~/.ssh`, which the
 standard forbids, and `bb test` covers exactly that.
 
 The lifecycle integration is `start-step`, not the helper modules. The compute
-state is read **once per run** (`read-state`, `{:params m}` or `{:error msg}`),
-on real create and real delete only, before the validators, and that one read
-serves the provider guard, `ensure-key!` and the adoption. Build and dry-run
-fill the placeholder; a real create runs `ensure-key!` against the read, then
-the provider preflight, then the `~/.ssh/config` checks; a real delete fills
-the real paths and adopts the instance address through the fail-closed
-`adopt-state` (a read error exits 1; an explicit `COLORS_PAR_IP` never skips
-the read or the guard, it only replaces a stale recorded address after the
-read succeeded). The create
+state is read **once per run** (ONCE's `compute/read-state` over this
+package's `state-output`, `{:params m}` or `{:error msg}`; only the SDK's
+step error — the shape `tofu output` fails with — reads as unreadable, any
+other exception propagates as a defect), on real create and real delete only,
+before the validators, and that one read serves the provider guard,
+`ensure-key!` and the adoption. Build and dry-run fill the placeholder; a real
+create runs `ensure-key!` against the read, then the provider preflight, then
+the `~/.ssh/config` checks; a real delete fills the real paths and adopts the
+instance address through the fail-closed `adopt-state` — ONCE's
+`compute/adopt-state` (a read error exits 1) inside this package's wrapper,
+which is where an explicit `COLORS_PAR_IP` is honoured: it never skips the
+read or the guard, it only replaces a stale recorded address after the read
+succeeded. The create
 matrix itself (leftover key, foreign key, interrupted create) is ONCE's and is
 tested there; this package tests the delegation.
 
@@ -117,8 +150,8 @@ writes the block after compute and before convergence; delete removes it
 *before* the destroy, the reverse of the keypair.
 
 `<provider>-name` is optional per the Compute Name Standard
-(`../workspace/standards/compute-name.md`): `validate/compute-name` resolves
-the profile or the override once, and every template interpolates
+(`../workspace/standards/compute-name.md`): `validate/compute-name` (ONCE's
+`compute/name`) resolves the profile or the override once, and every template interpolates
 `<{ compute-name }>` for the machine and its firewall.
 
 ## Layout and commands
@@ -181,11 +214,13 @@ token is the selected provider's alone: `COLORS_PAR_DO_TOKEN` or
 The package pins Green and ONCE in `green/deps.edn`, the Red SDK and
 `package-once-red` in `red/package.json`, and the Blue SDK and
 `package-once-blue` in `blue/pyproject.toml`. All three colours pin ONCE at the
-**same rev** (`759eb03`) — ONCE's own parity is what guarantees its colours
+**same rev** (`eea43c2`) — ONCE's own parity is what guarantees its colours
 agree per commit. ONCE supplies the state-backend provider registry (backend
-secrets and `tofu-env`) and the whole SSH Keypair Standard implementation, so
-the pin can never go below `bc06f2f`, the commit that moved the machine keypair
-into the operator's `~/.ssh`; a bump is its own change. The same ONCE rev is
+secrets and `tofu-env`), the whole SSH Keypair Standard implementation, and
+the Compute Provider Standard's operations (`compute`), so the pin can never
+go below `417d5f7`, the commit that added `compute`, itself above `bc06f2f`,
+the commit that moved the machine keypair into the operator's `~/.ssh`; a
+bump is its own change. The same ONCE rev is
 also written by hand into the red launcher's `PINS` and the blue launcher's
 PEP 723 header (through `green/tasks/pin.clj`), because a copied payload
 resolves ONCE from there, not from these manifests. `blue/pyproject.toml`

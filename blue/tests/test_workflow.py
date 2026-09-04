@@ -1,5 +1,6 @@
 import os
 
+from blue.workflow import StepError
 from conftest import SECRETS, make_fixture, make_optout, make_vultr
 from package_once_blue import ssh as once_ssh
 from package_posthog_blue import ssh, ssh_config, workflow
@@ -61,10 +62,12 @@ async def test_legacy_state_without_a_provider_accepts_only_the_default(monkeypa
 
 
 async def test_unreadable_backend_is_no_state_on_create_and_fatal_on_delete(monkeypatch):
+    # The stubs raise the shape `blue.tofu` raises: the SDK's StepError. Only
+    # that is an unreadable backend; anything else propagates as a defect.
     seen = {}
 
     async def unauthorized(_opts):
-        raise Exception("Unauthorized")
+        raise StepError("Unauthorized")
 
     async def record_state(opts, state_fn):
         seen["state"] = await state_fn(opts)
@@ -84,7 +87,16 @@ async def test_unreadable_backend_is_no_state_on_create_and_fatal_on_delete(monk
         assert "Unauthorized" in deleted["blue/err"]
 
 
-async def test_real_create_requires_the_selected_provider_credentials():
+def _no_state(monkeypatch):
+    """A real event on a fresh deployment: the state read finds nothing
+    recorded. Stubbed, so the validators under test never run `tofu output`."""
+    async def nothing(_opts):
+        return None
+    monkeypatch.setattr(workflow, "state_output", nothing)
+
+
+async def test_real_create_requires_the_selected_provider_credentials(monkeypatch):
+    _no_state(monkeypatch)
     r = await workflow.start_step(make_vultr(**{"blue/event": "create"}), env={})
     assert r["blue/exit"] == 2
     assert "COLORS_PAR_VULTR_API_KEY" in r["blue/err"]
@@ -126,14 +138,16 @@ async def test_build_and_dry_run_need_no_credentials():
     assert r["blue/exit"] == 0
 
 
-async def test_real_create_requires_credentials():
+async def test_real_create_requires_credentials(monkeypatch):
+    _no_state(monkeypatch)
     r = await workflow.start_step(make_fixture(**{"blue/event": "create"}), env={})
     assert r["blue/exit"] == 2
     assert "COLORS_PAR_DO_TOKEN" in r["blue/err"]
     assert "COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY" in r["blue/err"]
 
 
-async def test_delete_is_protected():
+async def test_delete_is_protected(monkeypatch):
+    _no_state(monkeypatch)
     r = await workflow.start_step(make_fixture(**{"blue/event": "delete"}), env={})
     assert r["blue/exit"] == 2
     assert "COMPUTE_PREVENT_DESTROY" in r["blue/err"]
@@ -159,7 +173,7 @@ async def test_delete_fails_loudly_when_state_is_unreadable(monkeypatch):
     # `tofu output` fail, nil was merged, and the inventory fell back to
     # TEST-NET. The failure must surface here, before any playbook runs.
     async def unauthorized(_opts):
-        raise Exception("Unauthorized")
+        raise StepError("Unauthorized")
     monkeypatch.setattr(workflow, "state_output", unauthorized)
     r = await workflow.start_step(deletable_fixture(**{"blue/event": "delete"}), env={})
     assert r["blue/exit"] == 1
@@ -172,7 +186,7 @@ async def test_explicit_ip_never_skips_the_read_or_the_provider_guard(monkeypatc
     # it is not a way around the read, the fail-closed rule, or the provider
     # guard (Compute Provider Standard §4).
     async def unauthorized(_opts):
-        raise Exception("Unauthorized")
+        raise StepError("Unauthorized")
     monkeypatch.setattr(workflow, "state_output", unauthorized)
     r = await workflow.start_step(deletable_fixture(**{"blue/event": "delete", "ip": "203.0.113.7"}), env={})
     assert r["blue/exit"] == 1
@@ -274,7 +288,7 @@ async def test_real_create_runs_the_key_matrix_then_both_preflights(monkeypatch)
 
     # An unreadable backend counts as no state on a create.
     async def unauthorized(_opts):
-        raise Exception("Unauthorized")
+        raise StepError("Unauthorized")
 
     async def record_state(opts, state_fn):
         return {**opts, "state": await state_fn(opts)}

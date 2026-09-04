@@ -75,8 +75,8 @@ def test_infrastructure_data_reads_the_selected_provider_sources():
 
 def test_fallback_params_are_the_documentation_address_on_every_provider():
     for make in (make_fixture, make_vultr):
-        assert tools.fallback_params(make()) == {"ip": "192.0.2.10", "user": "root", "sudoer": "root",
-                                                 "name": make()["profile"]}
+        assert tools.fallback_params(make()) == {"provider": make()["provider-compute"], "ip": "192.0.2.10",
+                                                 "user": "root", "sudoer": "root", "name": make()["profile"]}
     # `name` is the resolved compute name, as the templates' params output is.
     assert tools.fallback_params(make_fixture(**{"digitalocean-name": "analytics-1"}))["name"] == "analytics-1"
     assert tools.fallback_params(make_optout())["name"] == "posthog-optout"

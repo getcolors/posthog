@@ -1,6 +1,7 @@
 (ns io.github.getcolors.posthog.validate
   (:require [clojure.string :as str]
             [green.cli :as green-cli]
+            [io.github.getcolors.once.compute :as compute]
             [io.github.getcolors.once.ssh :as once-ssh]
             [io.github.getcolors.once.validate :as once-validate]))
 
@@ -41,6 +42,16 @@
   provider this package had."
   "digitalocean")
 
+(def spec
+  "How this package describes itself to ONCE's `compute`, the Compute Provider
+  Standard's operations over a package-owned registry. The registry and the
+  default are the data above; `:sources` names the firewall lists the
+  templates read — SSH must list at least one CIDR, an empty HTTP list means
+  no public HTTP. The name rules are ONCE's."
+  {:registry compute-providers
+   :default default-compute-provider
+   :sources {:non-empty ["ssh-sources"] :may-be-empty ["http-sources"]}})
+
 (def required
   [:profile :workdir :provider-compute :provider-dns :provider-backend
    :compute-prevent-destroy :posthog-host :posthog-admin-email :posthog-image
@@ -58,39 +69,21 @@
   ;; pin that cannot move under the deployment, so validation must accept it.
   #"^[^\s:@]+(?:/[^\s:@]+)*(?::[^\s:@]+|(?::[^\s:@]+)?@sha256:[0-9a-f]{64})$")
 
-;; Provider naming rules for the compute name override. DigitalOcean droplet
-;; names are hostname-like: lowercase letters, digits, dots and hyphens, up to
-;; 63 characters, starting and ending alphanumeric. Vultr labels are only a
-;; console string: letters of either case, digits, dot, underscore and hyphen,
-;; up to 63 characters.
-(def compute-name-res
-  {"digitalocean" #"^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$"
-   "vultr" #"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"})
-
 (defn missing? [x] (or (nil? x) (and (string? x) (str/blank? x))))
 
-(defn placeholder?
-  "Absent, blank or REPLACE_ME all mean 'use the profile' (Compute Name
-  Standard §2: presence is the only switch)."
-  [v]
-  (or (missing? v) (= "REPLACE_ME" (str/trim (str v)))))
-
-(defn compute-provider [opts] (get compute-providers (:provider-compute opts)))
-
-(defn compute-key
+(def compute-key
   "The selected provider's key for `suffix`: `:digitalocean-ssh-sources`,
   `:vultr-name`, and so on. Provider keys stay provider-scoped so an existing
-  colors.yml keeps meaning what it meant."
-  [opts suffix]
-  (keyword (str (:provider-compute opts) "-" suffix)))
+  colors.yml keeps meaning what it meant. ONCE's; named here so `tools` reads
+  the same."
+  compute/key)
 
-(defn compute-name
-  "What this deployment calls its machine. The one function that answers it —
-  every label, including the firewall's, derives from this and never from the
-  raw override key or a second copy of the profile (§3)."
-  [opts]
-  (let [override (get opts (compute-key opts "name"))]
-    (if (placeholder? override) (str (:profile opts)) (str/trim (str override)))))
+(def compute-name
+  "What this deployment calls its machine: `<provider>-name` when present,
+  else the profile (Compute Name Standard). ONCE's; every label, including the
+  firewall's, derives from this one answer and never from the raw override
+  key or a second copy of the profile (§3)."
+  compute/name)
 
 (defn keygen?
   "Whether this deployment owns its machine keypair. Delegates to ONCE, the
@@ -98,100 +91,26 @@
   [opts]
   (once-ssh/keygen? opts))
 
+(def cidrs
+  "A source list as desired state or an overlay string carries it. ONCE's, so
+  the validator and the templates can never disagree about what an entry is."
+  compute/cidrs)
+
 (defn env-errors [env]
   (when (not-empty (str (get env profile-par)))
     [(str profile-par " is set; profile must come from colors.yml only")]))
 
-;; --- CIDR syntax (Compute Provider Standard §5) ------------------------------
-;;
-;; Hand-rolled rather than delegated to a runtime library so the three colours
-;; accept exactly the same set of strings: an address that one colour's parser
-;; tolerates and another's rejects would be a parity bug at the firewall.
-
-(defn- ipv4-address? [s]
-  (let [parts (str/split (str s) #"\." -1)]
-    (and (= 4 (count parts))
-         (every? #(and (re-matches #"\d{1,3}" %) (<= (parse-long %) 255)) parts))))
-
-(defn- ipv6-address? [s]
-  (let [s (str s)
-        halves (str/split s #"::" -1)
-        groups (fn [half] (if (str/blank? half) [] (str/split half #":" -1)))
-        hex-group? #(re-matches #"[0-9A-Fa-f]{1,4}" %)
-        ;; An embedded dotted quad may close the address: ::ffff:192.0.2.10.
-        embedded? (fn [gs] (and (seq gs) (ipv4-address? (last gs))))
-        count-groups (fn [gs] (if (embedded? gs) (+ 2 (dec (count gs))) (count gs)))
-        well-formed? (fn [gs] (every? hex-group? (if (embedded? gs) (butlast gs) gs)))]
-    (case (count halves)
-      1 (let [gs (groups s)]
-          (and (well-formed? gs) (= 8 (count-groups gs))))
-      2 (let [[a b] (map groups halves)]
-          (and (well-formed? a) (well-formed? b)
-               (not (embedded? a))
-               (< (+ (count-groups a) (count-groups b)) 8)))
-      false)))
-
-(defn cidr?
-  "Whether `s` is a syntactically valid IPv4 or IPv6 CIDR: an address, a
-  slash, and a prefix length within the family's range."
-  [s]
-  (let [parts (str/split (str s) #"/" -1)]
-    (and (= 2 (count parts))
-         (let [[addr prefix] parts]
-           (and (re-matches #"\d{1,3}" prefix)
-                (let [n (parse-long prefix)]
-                  (or (and (ipv4-address? addr) (<= n 32))
-                      (and (ipv6-address? addr) (<= n 128)))))))))
-
-(defn cidr-list
-  "The entries of a source list, whether desired state supplied a YAML list or
-  an overlay string."
-  [v]
-  (let [xs (if (sequential? v) v (str/split (str v) #"[,\s]+"))]
-    (->> xs (map (comp str/trim str)) (remove str/blank?) vec)))
-
-(defn- source-errors
-  "The network contract: `<provider>-ssh-sources` must reach someone, and every
-  entry of both lists must be a CIDR — before any provider call. An empty
-  `<provider>-http-sources` is allowed and means no public HTTP."
+(defn state-errors
+  "Every problem with desired state at once: the missing keys (this package's
+  and the selected provider's), the package's own checks, then the Compute
+  Provider Standard's — selection, the network contract and the provider
+  rules — which are ONCE's over `spec`."
   [opts]
-  (when (compute-provider opts)
-    (let [ssh-k (compute-key opts "ssh-sources")
-          http-k (compute-key opts "http-sources")]
-      (concat
-       (when (and (not (missing? (get opts ssh-k))) (empty? (cidr-list (get opts ssh-k))))
-         [(str ssh-k " must list at least one CIDR; an empty list is a machine no one can reach")])
-       (for [k [ssh-k http-k]
-             :when (not (missing? (get opts k)))
-             entry (cidr-list (get opts k))
-             :when (not (cidr? entry))]
-         (str k " entry is not an IPv4 or IPv6 CIDR: " entry))))))
-
-(defn- provider-errors
-  "Checks that only make sense for the selected provider. Keys of an
-  unselected provider are never read."
-  [opts]
-  (case (:provider-compute opts)
-    "digitalocean"
-    (concat
-     (when (contains? opts :digitalocean-vpc-uuid)
-       [":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime"])
-     (when (contains? opts :digitalocean-vpc-cidr)
-       [":digitalocean-vpc-cidr must be absent; this package must not create a VPC"]))
-    "vultr"
-    (when-not (or (missing? (:vultr-os-id opts)) (integer? (:vultr-os-id opts)))
-      [":vultr-os-id must be Vultr's numeric operating-system id"])
-    nil))
-
-(defn state-errors [opts]
   (vec
    (concat
-    (for [k (concat required (:required (compute-provider opts)))
+    (for [k (concat required (compute/required-keys spec opts))
           :when (missing? (get opts k))]
       (str k " is required"))
-    (when-not (compute-provider opts)
-      [(str ":provider-compute must be one of "
-            (str/join ", " (sort (keys compute-providers))))])
     (when-not (= "cloudflare" (:provider-dns opts))
       [":provider-dns must be cloudflare"])
     (when-not (contains? #{"local" "s3" "r2"} (:provider-backend opts))
@@ -210,36 +129,14 @@
           :when (and (not (missing? (get opts k)))
                      (not (and (integer? (get opts k)) (pos? (get opts k)))))]
       (str k " must be a positive integer"))
-    (when-let [name-re (get compute-name-res (:provider-compute opts))]
-      (when-not (or (placeholder? (get opts (compute-key opts "name")))
-                    (re-matches name-re (compute-name opts)))
-        [(str (compute-key opts "name") " must be a valid " (:provider-compute opts) " machine name")]))
-    (source-errors opts)
-    (provider-errors opts))))
-
-(defn provider-state-errors
-  "Provider switching is a rebuild, never an apply (Compute Provider Standard
-  §4). All providers share one state key, so a changed provider-compute on a
-  profile with compute in state would plan a cross-provider replacement.
-  `recorded` is the compute stage's applied `params` (nil when no state is
-  readable): a recorded provider that differs from the selected one refuses,
-  and params without a provider — a deployment created before adoption — are
-  accepted only for the package default. Pure, so the read stays with the
-  lifecycle and the rule is testable without a backend."
-  [opts recorded]
-  (when recorded
-    (let [selected (:provider-compute opts)
-          held (or (some-> (:provider recorded) str not-empty) default-compute-provider)]
-      (when-not (= held selected)
-        [(str "state holds a " held " machine; set provider-compute back to "
-              held " and delete first")]))))
+    (compute/state-errors spec opts))))
 
 (defn backend-secrets [opts]
   (:secrets (get-in once-validate/providers
                     [:provider-backend (:provider-backend opts)])))
 
 (defn secret-errors [opts]
-  (let [keys (concat (:secrets (compute-provider opts))
+  (let [keys (concat (compute/secrets spec opts)
                      [:cloudflare-api-token
                       ;; The compose template interpolates these at run time and
                       ;; carries no fallback; the Django signing key in
@@ -256,7 +153,7 @@
 
 (defn tofu-env [opts slot]
   (case slot
-    :provider-compute (:tofu-env (compute-provider opts) {})
+    :provider-compute (compute/tofu-env spec opts)
     :provider-dns {:cloudflare-api-token "CLOUDFLARE_API_TOKEN"}
     :provider-backend (:tofu-env (get-in once-validate/providers
                                          [:provider-backend (:provider-backend opts)]) {})

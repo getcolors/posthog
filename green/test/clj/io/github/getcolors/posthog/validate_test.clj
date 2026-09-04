@@ -33,6 +33,26 @@
   (is (= ["digitalocean" "vultr"] (sort (keys validate/compute-providers))))
   (is (= "digitalocean" validate/default-compute-provider)))
 
+(deftest the-spec-carries-this-packages-registry-sources-and-default
+  ;; The operations are ONCE's; this is the data they run over. A colour
+  ;; whose registry, sources or default drifts fails here, in that colour.
+  (is (= #{"digitalocean" "vultr"} (set (keys (:registry validate/spec)))))
+  (is (= validate/compute-providers (:registry validate/spec)))
+  (is (= {:required [:digitalocean-region :digitalocean-size :digitalocean-image
+                     :digitalocean-ssh-sources :digitalocean-http-sources]
+          :secrets [:do-token]
+          :tofu-env {:do-token "DIGITALOCEAN_TOKEN"}}
+         (get-in validate/spec [:registry "digitalocean"])))
+  (is (= {:required [:vultr-region :vultr-plan :vultr-os-id
+                     :vultr-ssh-sources :vultr-http-sources]
+          :secrets [:vultr-api-key]
+          :tofu-env {:vultr-api-key "VULTR_API_KEY"}}
+         (get-in validate/spec [:registry "vultr"])))
+  (is (= {:non-empty ["ssh-sources"] :may-be-empty ["http-sources"]} (:sources validate/spec)))
+  (is (= "digitalocean" (:default validate/spec)))
+  (is (= validate/default-compute-provider (:default validate/spec)))
+  (is (not (contains? validate/spec :name-rules)) "the name rules are ONCE's"))
+
 (deftest unsupported-provider-is-named-with-the-alternatives
   (is (some #{":provider-compute must be one of digitalocean, vultr"}
             (validate/state-errors (fixture :provider-compute "hcloud")))))
@@ -50,12 +70,6 @@
     (is (not-any? #(str/includes? % "vultr") errors)))
   ;; Unselected-provider keys are accepted so one colors.yml stays portable.
   (is (= [] (validate/state-errors (fixture :vultr-region "ams" :vultr-ssh-keys "x")))))
-
-(deftest per-provider-checks-run-only-for-the-selected-provider
-  (is (some #(str/includes? % "vultr-os-id") (validate/state-errors (vultr :vultr-os-id "2284"))))
-  (is (= [] (validate/state-errors (fixture :vultr-os-id "2284"))))
-  (is (some #(str/includes? % "vpc-uuid") (validate/state-errors (fixture :digitalocean-vpc-uuid "x"))))
-  (is (= [] (validate/state-errors (vultr :digitalocean-vpc-uuid "x")))))
 
 (deftest secrets-and-tofu-env-follow-the-selected-provider
   (let [do-errors (str/join "\n" (validate/secret-errors (fixture)))
@@ -80,55 +94,26 @@
 
 ;; --- the network contract (§5) -----------------------------------------------
 
-(deftest cidr-syntax
-  (doseq [ok ["0.0.0.0/0" "10.0.0.0/8" "203.0.113.7/32" "::/0" "2001:db8::/32"
-              "fe80::1/128" "::ffff:192.0.2.10/96" "2001:db8:0:0:0:0:0:1/64"]]
-    (is (validate/cidr? ok) ok))
-  (doseq [bad ["" "10.0.0.0" "10.0.0.0/33" "256.0.0.1/8" "10.0.0/8" "::/129"
-               "2001:db8::/-1" "2001:db8:::1/64" "1:2:3:4:5:6:7:8:9/64" "g::1/64"
-               "10.0.0.0/8/8" "example.com/24"]]
-    (is (not (validate/cidr? bad)) bad)))
-
 (deftest ssh-sources-must-reach-someone
   (doseq [f [fixture vultr]]
     (let [opts (f)
           k (validate/compute-key opts "ssh-sources")
           errors (validate/state-errors (assoc opts k []))]
-      (is (some #(str/includes? % "at least one CIDR") errors) (str k)))))
+      (is (some #{(str k " must list at least one CIDR")} errors) (str k)))))
 
 (deftest malformed-sources-are-refused-in-either-list
   (doseq [f [fixture vultr]]
     (let [opts (f)
           ssh-k (validate/compute-key opts "ssh-sources")
           http-k (validate/compute-key opts "http-sources")]
-      (is (some #(str/includes? % "not an IPv4 or IPv6 CIDR: 10.0.0.0")
+      (is (some #{(str ssh-k " entry \"10.0.0.0\" is not an IPv4 or IPv6 CIDR")}
                 (validate/state-errors (assoc opts ssh-k ["10.0.0.0"]))))
-      (is (some #(str/includes? % "not an IPv4 or IPv6 CIDR: nope")
+      (is (some #{(str http-k " entry \"nope\" is not an IPv4 or IPv6 CIDR")}
                 (validate/state-errors (assoc opts http-k ["0.0.0.0/0" "nope"]))))
       ;; An empty http list means no public HTTP and is allowed.
       (is (= [] (validate/state-errors (assoc opts http-k []))))
       ;; Overlay strings are split the way the template reads them.
       (is (= [] (validate/state-errors (assoc opts ssh-k "10.0.0.0/8, 192.0.2.0/24")))))))
-
-;; --- provider switching is a rebuild (§4) ------------------------------------
-
-(deftest provider-state-refuses-a-switch
-  (is (= ["state holds a vultr machine; set provider-compute back to vultr and delete first"]
-         (validate/provider-state-errors (fixture) {:provider "vultr" :ip "203.0.113.7"})))
-  (is (= ["state holds a digitalocean machine; set provider-compute back to digitalocean and delete first"]
-         (validate/provider-state-errors (vultr) {:provider "digitalocean" :ip "203.0.113.7"}))))
-
-(deftest provider-state-accepts-the-recorded-provider-and-no-state
-  (is (nil? (validate/provider-state-errors (fixture) {:provider "digitalocean" :ip "203.0.113.7"})))
-  (is (nil? (validate/provider-state-errors (vultr) {:provider "vultr" :ip "203.0.113.7"})))
-  (is (nil? (validate/provider-state-errors (fixture) nil)))
-  (is (nil? (validate/provider-state-errors (vultr) nil))))
-
-(deftest legacy-params-without-a-provider-accept-only-the-default
-  ;; Every deployment created before adoption ran the package default.
-  (is (nil? (validate/provider-state-errors (fixture) {:ip "203.0.113.7"})))
-  (is (= ["state holds a digitalocean machine; set provider-compute back to digitalocean and delete first"]
-         (validate/provider-state-errors (vultr) {:ip "203.0.113.7"}))))
 
 (deftest machine-key-is-not-required
   ;; The standard makes absence meaningful: requiring digitalocean-ssh-keys
@@ -159,14 +144,6 @@
   (is (= "posthog-vultr-optout" (validate/compute-name (vultr-optout))))
   (is (some #(str/includes? % "vultr-name")
             (validate/state-errors (vultr :vultr-name "not valid!"))))
-  ;; Provider-specific rules: DigitalOcean names are hostname-like, Vultr
-  ;; labels are only a console string.
-  (is (some #(str/includes? % "digitalocean-name")
-            (validate/state-errors (fixture :digitalocean-name "invalid_name"))))
-  (is (some #(str/includes? % "digitalocean-name")
-            (validate/state-errors (fixture :digitalocean-name "Upper-Case"))))
-  (is (= [] (validate/state-errors (vultr :vultr-name "invalid_name"))))
-  (is (= [] (validate/state-errors (vultr :vultr-name "Upper_Case.1"))))
   ;; The unselected provider's name key is not read.
   (is (= "posthog-vultr-fixture" (validate/compute-name (vultr :digitalocean-name "other")))))
 

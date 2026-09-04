@@ -8,6 +8,7 @@ import * as tofu from "red/tofu";
 import { runtime } from "red/runtime";
 import type { Opts } from "red/workflow";
 import { StepError, failed } from "red/workflow";
+import { compute } from "package-once-red";
 import * as ssh from "./ssh.ts";
 import * as sshConfig from "./ssh-config.ts";
 import * as utils from "./utils.ts";
@@ -72,7 +73,7 @@ function spec(source: Template, target: string, data: Opts): Spec {
 const rawSpec = (target: string, content: string): Spec => contentSpec(target, content);
 
 export function cidrs(opts: Opts, k: string): string[] {
-  return validate.cidrList(opts[k]);
+  return validate.cidrs(opts, k);
 }
 
 export function credentialEnv(opts: Opts, ...slots: string[]): Record<string, string> | undefined {
@@ -92,14 +93,10 @@ export function backendCredentialEnv(opts: Opts): Record<string, string> | undef
   return credentialEnv(opts);
 }
 
-export function fallbackParams(opts: Opts): Opts {
-  return { ip: "192.0.2.10", user: "root", sudoer: "root", name: validate.computeName(opts) };
-}
-
-export function outputParams(result: Opts): Opts | undefined {
-  const output = result["tofu/outputs"] as Record<string, unknown> | undefined;
-  return output?.params as Opts | undefined;
-}
+// What `build` and `--dry-run` render in place of a compute output: the
+// documentation address, shaped like the selected provider's real `params` so
+// every later stage sees the same keys either way. ONCE's.
+export const fallbackParams = compute.fallbackParams;
 
 // Template values for the compute stage. The source lists are read through
 // `computeKey`, so the same data serves every provider's template.
@@ -125,18 +122,9 @@ export function infrastructureTemplate(opts: Opts): Template {
   return template(`infrastructure.${opts["provider-compute"]}`, "main.tf");
 }
 
-// Refuse to hand 192.0.2.10 to Ansible. That is the documentation address the
-// credential-free build and dry-run paths render with; on a real converge a
-// missing compute output must fail loudly rather than quietly point the whole
-// playbook at TEST-NET.
-export function resolvedCompute(result: Opts, fallback: Opts, outputs: Opts | undefined): Opts {
-  if (outputs?.ip) return { ...result, ...fallback, ...outputs };
-  return {
-    ...result, "red/exit": 1,
-    "red/err": "compute produced no ip output; refusing to converge " +
-      "against the documentation address",
-  };
-}
+// Refuse to hand 192.0.2.10 to Ansible on a real converge whose compute output
+// carries no `ip`. ONCE's; `infrastructureStep` is what wires it.
+export const resolvedCompute = compute.resolvedCompute;
 
 export async function infrastructureStep(opts: Opts): Promise<Opts> {
   const dir = toolDir(opts, infrastructureTool);
@@ -147,7 +135,7 @@ export async function infrastructureStep(opts: Opts): Promise<Opts> {
   if (failed(result)) return result;
   if (opts["red/event"] === "build") return { ...result, ...fallbackParams(opts) };
   if (opts["red/event"] === "delete") return result;
-  return resolvedCompute(result, fallbackParams(opts), outputParams(result));
+  return resolvedCompute(result, fallbackParams(opts), compute.outputParams(result));
 }
 
 export function zoneId(_zone: unknown): string {
