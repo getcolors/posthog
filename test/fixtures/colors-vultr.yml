@@ -1,0 +1,79 @@
+# Deterministic, credential-free Vultr fixture for tests and goldens.
+#
+# Keygen mode: no vultr-ssh-keys, so the package owns the machine keypair per
+# the SSH Keypair Standard, and no vultr-name, so the instance is labelled
+# after the profile per the Compute Name Standard. The opt-out variant is
+# fixtures/optout-vultr.yml.
+#
+# Required credentials:
+#   Vultr           COLORS_PAR_VULTR_API_KEY
+#   Cloudflare      COLORS_PAR_CLOUDFLARE_API_TOKEN
+#   state in R2     COLORS_PAR_R2_ACCESS_KEY_ID
+#                   COLORS_PAR_R2_SECRET_ACCESS_KEY
+#   backups in R2   COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID
+#                   COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY
+
+profile: posthog-vultr-fixture
+workdir: WORKDIR
+
+provider-compute: vultr
+provider-dns: cloudflare
+provider-backend: r2
+
+# Preserve this guard in committed desired state. Destruction requires an
+# explicitly authorized one-run override; never edit this flag to bypass it.
+compute-prevent-destroy: true
+
+# --- PostHog Stack -----------------------------------------------------------
+
+# The owner account provisioned on every converge; its password is
+# COLORS_PAR_POSTHOG_ADMIN_PASSWORD.
+posthog-admin-email: acceptance@example.invalid
+
+posthog-host: posthog.example.com
+# The application and plugin server images must come from one commit: they
+# share a Postgres schema, and a floating tag on either side means the node
+# process queries columns the application's migrations never created.
+posthog-image: posthog/posthog:82ea6681305bb00ad4ca920e3ba6e8fb39157424
+
+posthog-postgres-image: postgres:17-alpine
+posthog-clickhouse-image: clickhouse/clickhouse-server:26.6.2.158
+posthog-redis-image: redis:7.2-alpine
+posthog-plugin-server-image: posthog/posthog-node:82ea6681305bb00ad4ca920e3ba6e8fb39157424
+# :master resolved 2026-08-17.
+posthog-capture-image: ghcr.io/posthog/posthog/capture@sha256:8b07f51be1a8983c4d171b443a58c0deb3ab1e6e15202729cde85c3fa280b3e5
+posthog-temporal-image: temporalio/auto-setup:1.26.2
+posthog-kafka-image: redpandadata/redpanda:v25.1.9
+caddy-image: caddy:2.11.4
+
+posthog-postgres-data-dir: /var/lib/posthog/postgres
+posthog-clickhouse-data-dir: /var/lib/posthog/clickhouse
+posthog-redis-data-dir: /var/lib/posthog/redis
+posthog-kafka-data-dir: /var/lib/posthog/kafka
+posthog-backup-dir: /var/backups/posthog
+
+# --- Backups ----------------------------------------------------------------
+
+posthog-backup-r2-bucket: posthog-backup
+posthog-backup-r2-endpoint: https://319271fed8bc6d2d9059362be1165f37.eu.r2.cloudflarestorage.com
+posthog-backup-r2-region: auto
+posthog-backup-oncalendar: "*-*-* 02:30:00"
+posthog-backup-retention-days: 7
+
+# --- Vultr ------------------------------------------------------------------
+
+vultr-region: ams
+vultr-plan: vc2-4c-8gb
+vultr-os-id: 2284
+
+vultr-ssh-sources:
+  - 0.0.0.0/0
+  - "::/0"
+vultr-http-sources:
+  - 0.0.0.0/0
+  - "::/0"
+
+# --- OpenTofu state ----------------------------------------------------------
+
+r2-bucket: tofu-state-319271fed8bc6d2d9059362be1165f37-eu
+r2-endpoint: https://319271fed8bc6d2d9059362be1165f37.eu.r2.cloudflarestorage.com

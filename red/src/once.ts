@@ -24,6 +24,7 @@ export type Runner = (
 ) => Promise<{ exit: number; out: string; err: string }>;
 
 export interface OnceSsh {
+  machineKeyKeys: Record<string, string>;
   keygen(opts: Opts): boolean;
   withMachineKey(opts: Opts, real: boolean): Opts;
   ensureKey(opts: Opts, stateFn: StateFn, runFn?: Runner): Promise<Opts>;

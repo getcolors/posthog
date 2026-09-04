@@ -10,7 +10,7 @@ import stat
 from pathlib import Path
 
 import pytest
-from conftest import fixture, optout
+from conftest import fixture, make_vultr, make_vultr_optout, optout
 from package_posthog_blue import ssh
 
 
@@ -64,6 +64,33 @@ def test_opt_out_passes_through_untouched(home):
         assert opts["digitalocean-ssh-keys"] == "58495393"
         assert opts.get("ssh-public-key-path") is None, event
         assert opts.get("ssh-keygen") is None, event
+
+
+# ---------------------------------------------------------- per provider
+
+
+def test_the_placeholder_lands_on_the_selected_provider_key(home):
+    opts = ssh.with_machine_key({**make_vultr(), "blue/event": "build"})
+    assert opts["vultr-ssh-keys"] == opts["ssh-public-key-path"]
+    assert opts.get("digitalocean-ssh-keys") is None
+    out = ssh.with_machine_key({**make_vultr_optout(), "blue/event": "build"})
+    assert out["vultr-ssh-keys"] == "00000000-0000-0000-0000-000000000000"
+    assert out.get("ssh-keygen") is None
+
+
+def test_the_preflight_uses_the_selected_provider_token(home):
+    # do-token on DigitalOcean, vultr-api-key on Vultr — the delegation is what
+    # is tested; ONCE owns the table.
+    seen = []
+
+    def fetch(provider, token):
+        seen.append([provider, token])
+        return []
+    ssh.preflight(ssh.with_machine_key({**fixture(), "blue/event": "create",
+                                        "do-token": "do-t", "vultr-api-key": "v-t"}), fetch)
+    ssh.preflight(ssh.with_machine_key({**make_vultr(), "blue/event": "create",
+                                        "do-token": "do-t", "vultr-api-key": "v-t"}), fetch)
+    assert seen == [["digitalocean", "do-t"], ["vultr", "v-t"]]
 
 
 # -------------------------------------------------------- the create matrix

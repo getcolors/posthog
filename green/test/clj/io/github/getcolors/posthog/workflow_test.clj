@@ -7,7 +7,7 @@
             [io.github.getcolors.once.ssh :as once-ssh]
             [io.github.getcolors.posthog.ssh :as ssh]
             [io.github.getcolors.posthog.ssh-config :as ssh-config]
-            [io.github.getcolors.posthog.validate-test :refer [fixture optout]]
+            [io.github.getcolors.posthog.validate-test :refer [fixture optout vultr]]
             [io.github.getcolors.posthog.workflow :as workflow]))
 
 (deftest build-and-dry-run-need-no-credentials
@@ -72,16 +72,38 @@
     (let [r (workflow/start-step (deletable-fixture :green/event :delete) {})]
       (is (= 1 (:green/exit r)))
       (is (str/includes? (:green/err r) "Unauthorized"))
-      (is (str/includes? (:green/err r) "COLORS_PAR_IP")))))
+      (is (str/includes? (:green/err r) "could not read the infrastructure state for the delete cleanup")))))
 
-(deftest delete-with-explicit-ip-skips-the-state-read
-  ;; COLORS_PAR_IP is the operator's escape hatch when the state backend is
-  ;; unreachable; it must not require the read it exists to replace.
-  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "must not be called" {})))]
-    (let [r (workflow/start-step (deletable-fixture :green/event :delete
-                                                    :ip "203.0.113.7") {})]
+(deftest explicit-ip-never-skips-the-read-or-the-provider-guard
+  ;; COLORS_PAR_IP replaces a stale recorded address once the read succeeded;
+  ;; it is not a way around the read, the fail-closed rule, or the provider
+  ;; guard (Compute Provider Standard §4).
+  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {})))]
+    (let [r (workflow/start-step (deletable-fixture :green/event :delete :ip "203.0.113.7") {})]
+      (is (= 1 (:green/exit r)))
+      (is (str/includes? (:green/err r) "Unauthorized"))))
+  (with-redefs [workflow/state-output (fn [_] {:provider "vultr" :ip "198.51.100.4"})]
+    (let [r (workflow/start-step (deletable-fixture :green/event :delete :ip "203.0.113.7") {})]
+      (is (= 2 (:green/exit r)))
+      (is (str/includes? (:green/err r) "state holds a vultr machine"))))
+  (with-redefs [workflow/state-output (fn [_] {:provider "digitalocean" :ip "198.51.100.4"})]
+    (let [r (workflow/start-step (deletable-fixture :green/event :delete :ip "203.0.113.7") {})]
       (is (= 0 (:green/exit r)))
-      (is (= "203.0.113.7" (:ip r))))))
+      (is (= "203.0.113.7" (:ip r)) "the override wins over the recorded address after the read"))))
+
+(deftest state-is-read-once-per-run
+  ;; One read serves the provider validator, the key matrix and the adoption;
+  ;; a second read would be a second chance for the backend to disagree.
+  (doseq [event [:create :delete]]
+    (let [reads (atom 0)]
+      (with-redefs [workflow/state-output (fn [_] (swap! reads inc) {:provider "digitalocean" :ip "203.0.113.9"})
+                    ssh/ensure-key! (fn [opts state-fn] (assoc opts ::state (state-fn opts)))
+                    ssh/preflight! identity ssh-config/preflight! identity]
+        (let [r (workflow/start-step (deletable-fixture :green/event event :compute-prevent-destroy (= event :create)) {})]
+          (is (= 0 (:green/exit r)) (str event))
+          (is (= 1 @reads) (str event))
+          (when (= event :create) (is (= "203.0.113.9" (:ip (::state r)))))
+          (when (= event :delete) (is (= "203.0.113.9" (:ip r)))))))))
 
 (deftest delete-with-empty-state-proceeds-without-an-address
   ;; State readable, no compute recorded: the instance is already gone, the
@@ -171,6 +193,79 @@
                                         (mapcat identity (optout))) {})]
       (is (= 0 (:green/exit r)))
       (is (= "58495393" (:digitalocean-ssh-keys r))))))
+
+(defn- with-secrets [opts]
+  (merge opts {:do-token "t" :vultr-api-key "t" :cloudflare-api-token "t"
+               :posthog-secret-key "s" :posthog-postgres-password "p"
+               :posthog-oidc-rsa-private-key "k" :posthog-encryption-salt-keys "k"
+               :posthog-admin-password "p" :posthog-backup-r2-access-key-id "k"
+               :posthog-backup-r2-secret-access-key "s"
+               :r2-access-key-id "k" :r2-secret-access-key "s"}))
+
+(deftest provider-switch-is-refused-on-create-and-delete
+  ;; Compute Provider Standard §4: all providers share one state key, so a
+  ;; changed provider-compute on a profile with compute in state would plan a
+  ;; cross-provider replacement. Both events refuse, and delete refuses because
+  ;; it would render and destroy the *selected* provider's template.
+  (with-redefs [workflow/state-output (fn [_] {:provider "digitalocean" :ip "203.0.113.7"})
+                ssh/ensure-key! (fn [opts _] opts) ssh/preflight! identity ssh-config/preflight! identity]
+    (doseq [opts [(with-secrets (assoc (vultr) :green/event :create))
+                  (with-secrets (assoc (vultr) :green/event :delete :compute-prevent-destroy false))]]
+      (let [r (workflow/start-step opts {})]
+        (is (= 2 (:green/exit r)) (str (:green/event opts)))
+        (is (str/includes? (:green/err r)
+                           "state holds a digitalocean machine; set provider-compute back to digitalocean and delete first")))))
+  (with-redefs [workflow/state-output (fn [_] {:provider "vultr" :ip "203.0.113.7"})]
+    (doseq [opts [(with-secrets (assoc (fixture) :green/event :create))
+                  (with-secrets (assoc (fixture) :green/event :delete :compute-prevent-destroy false))]]
+      (is (str/includes? (:green/err (workflow/start-step opts {}))
+                         "state holds a vultr machine; set provider-compute back to vultr and delete first")))))
+
+(deftest provider-switch-reports-before-the-missing-token
+  ;; The validator order is the thing under test: a mistaken provider edit
+  ;; must report the actionable error, not a missing credential for the
+  ;; newly selected provider.
+  (with-redefs [workflow/state-output (fn [_] {:provider "digitalocean" :ip "203.0.113.7"})]
+    (doseq [event [:create :delete]]
+      (let [opts (dissoc (with-secrets (assoc (vultr) :green/event event :compute-prevent-destroy false))
+                         :vultr-api-key)
+            r (workflow/start-step opts {})
+            lines (str/split-lines (str (:green/err r)))]
+        (is (= 2 (:green/exit r)))
+        (is (some #(str/includes? % "state holds a digitalocean machine") lines))
+        (is (not-any? #(str/includes? % "required credential is not set: COLORS_PAR_VULTR_API_KEY") lines)
+            (str event))))))
+
+(deftest legacy-state-without-a-provider-accepts-only-the-default
+  (with-redefs [workflow/state-output (fn [_] {:ip "203.0.113.7"})
+                ssh/ensure-key! (fn [opts _] opts) ssh/preflight! identity ssh-config/preflight! identity]
+    (doseq [event [:create :delete]]
+      (is (= 0 (:green/exit (workflow/start-step
+                             (with-secrets (assoc (fixture) :green/event event :compute-prevent-destroy false)) {})))
+          (str "default provider " event))
+      (let [r (workflow/start-step
+               (with-secrets (assoc (vultr) :green/event event :compute-prevent-destroy false)) {})]
+        (is (= 2 (:green/exit r)) (str "non-default " event))
+        (is (str/includes? (:green/err r) "set provider-compute back to digitalocean"))))))
+
+(deftest unreadable-backend-is-no-state-on-create-and-fatal-on-delete
+  (with-redefs [workflow/state-output (fn [_] (throw (ex-info "Unauthorized" {})))
+                ssh/ensure-key! (fn [opts state-fn] (assoc opts ::state (state-fn opts)))
+                ssh/preflight! identity ssh-config/preflight! identity]
+    (doseq [f [fixture vultr]]
+      (let [r (workflow/start-step (with-secrets (assoc (f) :green/event :create)) {})]
+        (is (= 0 (:green/exit r)))
+        (is (nil? (::state r))))
+      (let [r (workflow/start-step (with-secrets (assoc (f) :green/event :delete :compute-prevent-destroy false)) {})]
+        (is (= 1 (:green/exit r)))
+        (is (str/includes? (:green/err r) "could not read the infrastructure state for the delete cleanup"))
+        (is (str/includes? (:green/err r) "Unauthorized"))))))
+
+(deftest real-create-requires-the-selected-provider-credentials
+  (let [r (workflow/start-step (assoc (vultr) :green/event :create) {})]
+    (is (= 2 (:green/exit r)))
+    (is (str/includes? (:green/err r) "COLORS_PAR_VULTR_API_KEY"))
+    (is (not (str/includes? (:green/err r) "COLORS_PAR_DO_TOKEN")))))
 
 (deftest graph-orders-private-stack
   (is (= [:posthog/infrastructure]

@@ -80,6 +80,7 @@ resource "digitalocean_firewall" "posthog" {
 
 output "params" {
   value = {
+    provider   = "digitalocean"
     ip         = digitalocean_droplet.posthog.ipv4_address
     user       = "root"
     sudoer     = "root"

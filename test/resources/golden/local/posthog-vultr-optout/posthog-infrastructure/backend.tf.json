@@ -1,0 +1,19 @@
+{
+  "terraform" : {
+    "backend" : {
+      "s3" : {
+        "bucket" : "tofu-state-319271fed8bc6d2d9059362be1165f37-eu",
+        "endpoints" : {
+          "s3" : "https://319271fed8bc6d2d9059362be1165f37.eu.r2.cloudflarestorage.com"
+        },
+        "key" : "posthog-vultr-optout/posthog-infrastructure.tfstate",
+        "region" : "auto",
+        "skip_credentials_validation" : true,
+        "skip_metadata_api_check" : true,
+        "skip_region_validation" : true,
+        "skip_requesting_account_id" : true,
+        "use_path_style" : false
+      }
+    }
+  }
+}

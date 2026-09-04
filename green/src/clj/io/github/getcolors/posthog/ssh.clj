@@ -2,11 +2,12 @@
   "The deployment's machine keypair, per the workspace SSH Keypair Standard.
 
   The behaviour itself is ONCE's (`io.github.getcolors.once.ssh`): keygen mode
-  when desired state carries no `digitalocean-ssh-keys`, an ed25519 key named
-  after the profile in `~/.ssh`, the create matrix, the DigitalOcean REST
-  preflight, and a cleanup that runs only after a successful destroy. Reusing
-  it rather than reimplementing means one standard has one implementation, and
-  a fix upstream reaches this package when the pin moves.
+  when desired state carries no `<provider>-ssh-keys` for the selected compute
+  provider, an ed25519 key named after the profile in `~/.ssh`, the create
+  matrix, the provider REST preflight (DigitalOcean and Vultr alike, with the
+  token each one takes), and a cleanup that runs only after a successful
+  destroy. Reusing it rather than reimplementing means one standard has one
+  implementation, and a fix upstream reaches this package when the pin moves.
 
   What is added here is a build-time placeholder. ONCE derives the key paths
   from `$HOME` and does not commit rendered output; posthog does commit
@@ -48,7 +49,10 @@
           (assoc opts
                  :ssh-private-key-path prv
                  :ssh-public-key-path pub
-                 :digitalocean-ssh-keys pub))))))
+                 ;; The selected provider's machine-key key, per ONCE's table,
+                 ;; so the placeholder lands where that provider's template
+                 ;; reads it.
+                 (once-ssh/machine-key-keys (:provider-compute opts)) pub))))))
 
 (defn ensure-key!
   "The standard's create matrix and key generation, on a real create."
@@ -56,8 +60,8 @@
   (once-ssh/ensure-key! opts state-fn))
 
 (defn preflight!
-  "Refuse a real create when the DigitalOcean account holds a key named after
-  the profile that this deployment's state does not own."
+  "Refuse a real create when the provider account holds a key named after the
+  profile that this deployment's state does not own."
   [opts]
   (once-ssh/preflight! opts))
 

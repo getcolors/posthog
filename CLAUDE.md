@@ -3,9 +3,9 @@
 ## Repository
 
 `posthog` is a tri-colour Package Skill (green, red, blue) for a single-node
-PostHog analytics suite on DigitalOcean. It manages OpenTofu compute/firewall,
-dynamic regional default VPC lookup, Cloudflare DNS, and converges a
-ten-container Docker Compose stack:
+PostHog analytics suite on DigitalOcean or Vultr. It manages OpenTofu
+compute/firewall (with the regional default VPC lookup on DigitalOcean),
+Cloudflare DNS, and converges a ten-container Docker Compose stack:
 the PostHog web process and Celery worker, a standalone Rust `capture` service,
 the Node plugin server, Redpanda, Temporal, PostgreSQL, ClickHouse with embedded
 Keeper, Redis, and Caddy. The first consumer is `../posthog-digitalocean`.
@@ -24,6 +24,43 @@ systemd timer running `/usr/local/sbin/posthog-backup`, taking a Postgres
 `pg_dump` and a native ClickHouse `BACKUP` — never a hot `tar`, which races the
 server's merges — uploaded to Cloudflare R2.
 
+## The two-provider golden and parity axis
+
+The package supports two compute providers, `digitalocean` (the default) and
+`vultr`, per the workspace Compute Provider Standard
+(`../workspace/standards/compute-provider.md`). They are selected by template
+directory (`tools/infrastructure/<provider>/main.tf`), never by conditionals
+inside one file, so a build is the only thing that proves a provider's tree
+renders at all. `validate/compute-providers` is the registry: the advertised
+names, each one's required keys, secret and `tofu-env`; per-provider checks
+(the DigitalOcean VPC bans, the Vultr numeric os id) run only for the selected
+provider and keys of the unselected provider are accepted and ignored.
+`compute-key` scopes every provider key (`<provider>-ssh-sources`,
+`<provider>-name`) and the CIDR validator refuses an empty ssh list or any
+entry that is not a syntactically valid v4 or v6 CIDR before a provider is
+contacted.
+
+Switching providers is a rebuild, never an apply. Every compute template
+records `provider` in its `params` output, and on every real create and delete
+the start step reads the recorded params with backend credentials only and
+refuses a mismatch — before provider-secret validation, and pre-empting it, so
+a mistaken edit reports `state holds a <recorded> machine; set
+provider-compute back to <recorded> and delete first` rather than a missing
+token for the new provider. Params without a provider (a deployment created
+before adoption) are held to `digitalocean`. An unreadable backend is no state
+on a create and, through `adopt-state`, fatal on a delete.
+
+There are four fixtures — one per provider per keypair mode —
+`test/fixtures/colors.yml` (`posthog-fixture`), `optout.yml`
+(`posthog-optout`), `colors-vultr.yml` (`posthog-vultr-fixture`) and
+`optout-vultr.yml` (`posthog-vultr-optout`), each with a committed golden
+tree. `scripts/golden.sh` checks green against all four; `scripts/parity.sh`
+renders all four through every colour and diffs the trees — and the colour
+template trees — byte for byte. A provider without a golden is not advertised.
+The live-verified matrix is recorded here once each provider has been through
+a real create: DigitalOcean by `../posthog-digitalocean`; Vultr pending
+`../posthog-vultr`.
+
 ## The SSH keypair
 
 This package conforms to the workspace SSH Keypair Standard
@@ -33,12 +70,13 @@ counterparts.
 
 The behaviour is ONCE's — `io.github.getcolors.once.ssh` — deliberately reused
 rather than reimplemented, so one standard has one implementation. Absent
-`digitalocean-ssh-keys` in desired state means keygen mode: the package
-generates `~/.ssh/<profile>`, declares the `digitalocean_ssh_key` resource
-named after the profile and references it by attribute, runs the DigitalOcean
-REST preflight before applying, names the key explicitly for Ansible
+`<provider>-ssh-keys` in desired state means keygen mode: the package
+generates `~/.ssh/<profile>`, declares the account key resource
+(`digitalocean_ssh_key` or `vultr_ssh_key`) named after the profile and
+references it by attribute, runs the provider REST preflight before applying
+with the selected provider's token, names the key explicitly for Ansible
 (`private_key_file`) and for every acceptance `ssh`, and removes the local key
-last, only after the compute destroy succeeded. Present `digitalocean-ssh-keys`
+last, only after the compute destroy succeeded. Present `<provider>-ssh-keys`
 means opt-out: the package touches no key material and renders the historical
 shape byte for byte.
 
@@ -49,18 +87,21 @@ why `ssh/rendered-only?` tests `:green/dry-run` as well as the event — a
 dry-run that fell through to the real path would read `~/.ssh`, which the
 standard forbids, and `bb test` covers exactly that.
 
-The lifecycle integration is `start-step`'s `after-validate`, not the helper
-modules: build and dry-run fill the placeholder; a real create runs
-`ensure-key!` against a best-effort state read, then the provider preflight,
-then the `~/.ssh/config` checks; a real delete fills the real paths and adopts
-the instance address through the fail-closed `adopt-state` (an unreadable
-backend exits 1, an explicit `COLORS_PAR_IP` skips the read). The create
+The lifecycle integration is `start-step`, not the helper modules. The compute
+state is read **once per run** (`read-state`, `{:params m}` or `{:error msg}`),
+on real create and real delete only, before the validators, and that one read
+serves the provider guard, `ensure-key!` and the adoption. Build and dry-run
+fill the placeholder; a real create runs `ensure-key!` against the read, then
+the provider preflight, then the `~/.ssh/config` checks; a real delete fills
+the real paths and adopts the instance address through the fail-closed
+`adopt-state` (a read error exits 1; an explicit `COLORS_PAR_IP` never skips
+the read or the guard, it only replaces a stale recorded address after the
+read succeeded). The create
 matrix itself (leftover key, foreign key, interrupted create) is ONCE's and is
 tested there; this package tests the delegation.
 
-`bb golden` renders two fixtures because the standard has two modes: keygen
-(`test/fixtures/colors.yml`) and opt-out (`test/fixtures/optout.yml`). A change
-that only holds in one of them is not conforming.
+`bb golden` renders both keypair modes for every provider because the standard
+has two modes. A change that only holds in one of them is not conforming.
 
 ## The `~/.ssh/config` block and the compute name
 
@@ -75,10 +116,10 @@ fails if a dotted quad ever appears under `posthog-ansible-local`. Create
 writes the block after compute and before convergence; delete removes it
 *before* the destroy, the reverse of the keypair.
 
-`digitalocean-name` is optional per the Compute Name Standard
+`<provider>-name` is optional per the Compute Name Standard
 (`../workspace/standards/compute-name.md`): `validate/compute-name` resolves
-the profile or the override once, and the template interpolates
-`<{ compute-name }>` for the droplet and its firewall.
+the profile or the override once, and every template interpolates
+`<{ compute-name }>` for the machine and its firewall.
 
 ## Layout and commands
 
@@ -87,7 +128,7 @@ The three implementations live in the tri-colour layout, matching `netbird` and
 `green/src/`, `green/tasks/`, tests under `green/test/clj`), TypeScript/Bun in
 `red/`, and Python/uv in `blue/`. Green is canonical: a behavioural change lands
 in all three colours in the same commit and passes `scripts/parity.sh`, which
-renders both fixtures through every colour and diffs the trees — and the colour
+renders all four fixtures through every colour and diffs the trees — and the colour
 template trees (`red/resources`, blue's embedded `resources/`) — byte for byte.
 The fixtures and the goldens are shared across colours at the repository root —
 `test/fixtures/` and `test/resources/golden/` — with `green/test/fixtures` and
@@ -100,7 +141,7 @@ cd green && bb golden
 cd green && bb golden:accept   # regenerate after an intended change — read the diff first
 cd red && bun test && bun run typecheck
 cd blue && uv run pytest
-./scripts/parity.sh            # three colours, two fixtures, byte for byte
+./scripts/parity.sh            # three colours, four fixtures, byte for byte
 ./scripts/launcher.sh          # from the repository root
 cd green && ./green build
 cd green && ./green create --dry-run
@@ -115,8 +156,8 @@ must not touch `~/.ssh`.
 ## Invariants
 
 `colors.yml` is flat, non-secret desired state. Validation accumulates errors
-and rejects every configurable VPC identifier: the OpenTofu data source looks up
-the existing default VPC by `digitalocean-region`.
+and, on DigitalOcean, rejects every configurable VPC identifier: the OpenTofu
+data source looks up the existing default VPC by `digitalocean-region`.
 
 The root `colors.yml` is the only desired state no suite exercises — `bb test`
 is unit tests and `bb golden` uses `test/fixtures/colors.yml` — so it drifts
@@ -131,7 +172,9 @@ PostHog's schema puts TTLs on `DateTime64` columns, which 24.8 rejects outright.
 
 Eleven `COLORS_PAR_*` credentials are required, not six — the five application
 secrets have no defaults, and `secret-errors` fails a real `create` before the
-first provider call rather than falling back to a published value.
+first provider call rather than falling back to a published value. The compute
+token is the selected provider's alone: `COLORS_PAR_DO_TOKEN` or
+`COLORS_PAR_VULTR_API_KEY`.
 
 ## Coupling
 

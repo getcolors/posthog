@@ -10,7 +10,7 @@
             [clojure.test :refer [deftest is testing]]
             [io.github.getcolors.once.ssh :as once-ssh]
             [io.github.getcolors.posthog.ssh :as ssh]
-            [io.github.getcolors.posthog.validate-test :refer [fixture optout]]))
+            [io.github.getcolors.posthog.validate-test :refer [fixture optout vultr vultr-optout]]))
 
 (defn- with-home
   "Run `f` with `~/.ssh` redirected into a fresh temporary home."
@@ -50,6 +50,29 @@
           (is (= "58495393" (:digitalocean-ssh-keys opts)))
           (is (nil? (:ssh-public-key-path opts)) (str event))
           (is (nil? (:ssh-keygen opts)) (str event)))))))
+
+;;; ---------------------------------------------------------- per provider
+
+(deftest the-placeholder-lands-on-the-selected-provider-key
+  (with-home
+    (fn [_]
+      (let [opts (ssh/with-machine-key (assoc (vultr) :green/event :build))]
+        (is (= (:ssh-public-key-path opts) (:vultr-ssh-keys opts)))
+        (is (nil? (:digitalocean-ssh-keys opts))))
+      (let [opts (ssh/with-machine-key (assoc (vultr-optout) :green/event :build))]
+        (is (= "00000000-0000-0000-0000-000000000000" (:vultr-ssh-keys opts)))
+        (is (nil? (:ssh-keygen opts)))))))
+
+(deftest the-preflight-uses-the-selected-provider-token
+  ;; :do-token on DigitalOcean, :vultr-api-key on Vultr — the delegation is
+  ;; what is tested; ONCE owns the table.
+  (with-home
+    (fn [_]
+      (let [seen (atom [])]
+        (with-redefs [once-ssh/fetch-account-keys (fn [provider token] (swap! seen conj [provider token]) [])]
+          (ssh/preflight! (ssh/with-machine-key (assoc (fixture) :green/event :create :do-token "do-t" :vultr-api-key "v-t")))
+          (ssh/preflight! (ssh/with-machine-key (assoc (vultr) :green/event :create :do-token "do-t" :vultr-api-key "v-t")))
+          (is (= [["digitalocean" "do-t"] ["vultr" "v-t"]] @seen)))))))
 
 ;;; -------------------------------------------------------- the create matrix
 

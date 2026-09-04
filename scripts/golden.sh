@@ -5,12 +5,14 @@ set -euo pipefail
 # and diff against committed output. scripts/parity.sh is the net across
 # colours.
 #
-# Two fixtures, because the SSH Keypair Standard has two modes and a package
-# conforms only if both hold. `colors.yml` is keygen mode (no
-# digitalocean-ssh-keys): the compute template must declare the profile-named
-# digitalocean_ssh_key resource and reference it by attribute. `optout.yml`
-# supplies an explicit key id and must render the historical shape, byte for
-# byte, creating nothing.
+# Four fixtures: one per advertised compute provider per SSH keypair mode
+# (Compute Provider Standard §7). Providers are selected by template directory,
+# so a build is the only thing that proves a provider's tree renders at all —
+# a unit test over the registry passes while its template is missing. In
+# keygen mode (`colors.yml`, `colors-vultr.yml`; no `<provider>-ssh-keys`) the
+# compute template must declare the profile-named account key resource and
+# reference it by attribute; in opt-out mode (`optout.yml`,
+# `optout-vultr.yml`) it must render a literal key id, creating nothing.
 #
 # Keygen paths are rendered from a fixed placeholder home on :build, never from
 # $HOME, so these goldens mean the same thing on every workstation.
@@ -25,7 +27,7 @@ accept=0
 [[ ${1:-} == --accept ]] && accept=1
 
 status=0
-for variant in colors optout; do
+for variant in colors optout colors-vultr optout-vultr; do
   fixture="$tmp/$variant.yml"
   sed "s#WORKDIR#$tmp/work#" "$root/test/fixtures/$variant.yml" > "$fixture"
   (cd "$root/green" && POSTHOG_LIB_ROOT="$root" ./green build -f "$fixture" >/dev/null)

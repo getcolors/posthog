@@ -4,8 +4,10 @@
 #
 # Required credentials. The stack has no defaults for any of these: a real
 # create fails before the first provider call rather than falling back to a
-# value published in this repository.
-#   DigitalOcean    COLORS_PAR_DO_TOKEN
+# value published in this repository. Only the selected compute provider's
+# token is required.
+#   DigitalOcean    COLORS_PAR_DO_TOKEN         (provider-compute: digitalocean)
+#   Vultr           COLORS_PAR_VULTR_API_KEY    (provider-compute: vultr)
 #   Cloudflare      COLORS_PAR_CLOUDFLARE_API_TOKEN
 #   state in R2     COLORS_PAR_R2_ACCESS_KEY_ID
 #                   COLORS_PAR_R2_SECRET_ACCESS_KEY
@@ -20,6 +22,10 @@
 profile: posthog-example
 workdir: .colors
 
+# digitalocean or vultr. Keys of the unselected provider below are ignored, so
+# both blocks can stay. Switching is a rebuild, never an apply: with a machine
+# in state, create and delete both refuse until this is set back to the
+# recorded provider and the deployment is deleted first.
 provider-compute: digitalocean
 provider-dns: cloudflare
 provider-backend: r2
@@ -94,6 +100,24 @@ digitalocean-ssh-sources:
 digitalocean-http-sources:
   - 0.0.0.0/0
   - "::/0"
+
+# --- Vultr (provider-compute: vultr) ---------------------------------------
+#
+# vultr-region: ams
+# vultr-plan: vc2-4c-8gb
+# # Numeric OS id; 2284 is Ubuntu 24.04 LTS x64.
+# vultr-os-id: 2284
+# # The instance label defaults to the profile; the package never sets a Vultr
+# # hostname, which is ForceNew.
+# # vultr-name: posthog-example
+# # Absent means the package generates and owns the machine key (see above).
+# # vultr-ssh-keys: 00000000-0000-0000-0000-000000000000
+# vultr-ssh-sources:
+#   - 0.0.0.0/0
+#   - "::/0"
+# vultr-http-sources:
+#   - 0.0.0.0/0
+#   - "::/0"
 
 # --- OpenTofu state ----------------------------------------------------------
 

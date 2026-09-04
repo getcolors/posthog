@@ -9,8 +9,10 @@ set -euo pipefail
 # (red/resources and blue's embedded resources are copies of green's tree, not
 # references to it).
 #
-# Two fixtures, because the SSH Keypair Standard has two modes and parity means
-# both keygen and opt-out hold in every colour.
+# Four fixtures — one per compute provider per SSH keypair mode — because
+# providers are selected by template directory and the SSH Keypair Standard
+# has two modes: parity means DigitalOcean and Vultr, keygen and opt-out, all
+# hold in every colour.
 #
 # Renders resolve each colour's package from this working tree (the
 # POSTHOG_LIB_ROOT overrides), while green, once, red, and blue stay on
@@ -35,6 +37,8 @@ build_variant() {
 
 build_variant colors
 build_variant optout
+build_variant colors-vultr
+build_variant optout-vultr
 
 diff -r "$root/green/src/resources/io/github/getcolors/posthog/tools" "$root/red/resources/tools"
 diff -r "$root/green/src/resources/io/github/getcolors/posthog/tools" "$root/blue/src/package_posthog_blue/resources/tools"

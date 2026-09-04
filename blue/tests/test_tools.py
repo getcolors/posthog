@@ -5,10 +5,11 @@ from pathlib import Path
 
 import pytest
 from blue.cli import load_yaml
+from blue.scaffold import render_template
 from blue.runtime import runtime
 from blue.runtime import ExecResult
 
-from conftest import FIXTURE_FILE, make_fixture, make_optout
+from conftest import FIXTURE_FILE, make_fixture, make_optout, make_vultr, make_vultr_optout
 from package_posthog_blue import tools
 
 RESOURCES = Path(tools.__file__).parent / "resources" / "tools"
@@ -53,6 +54,56 @@ async def test_delete_cleanup_targets_the_adopted_address(monkeypatch):
 def test_infrastructure_discovers_default_vpc():
     data = tools.infrastructure_data(make_fixture())
     assert tools.cidrs(data, "digitalocean-http-sources") == ["0.0.0.0/0", "::/0"]
+
+
+def test_template_directory_follows_the_provider():
+    # Providers are selected by directory, never by conditionals in one file.
+    assert tools.infrastructure_template(make_fixture())["name"] == "tools/infrastructure/digitalocean/main.tf"
+    assert tools.infrastructure_template(make_vultr())["name"] == "tools/infrastructure/vultr/main.tf"
+
+
+def test_infrastructure_data_reads_the_selected_provider_sources():
+    data = tools.infrastructure_data(make_vultr())
+    assert data["ssh-sources-hcl"] == '["0.0.0.0/0", "::/0"]'
+    assert data["ssh-keygen"] is True
+    assert data["compute-name"] == "posthog-vultr-fixture"
+    assert tools.infrastructure_data(make_vultr_optout())["ssh-keygen"] is False
+    # A DigitalOcean list is not read for a Vultr render.
+    assert tools.infrastructure_data(make_vultr(**{"vultr-ssh-sources": [],
+                                                   "digitalocean-ssh-sources": ["10.0.0.0/8"]}))["ssh-sources-hcl"] == "[]"
+
+
+def test_fallback_params_are_the_documentation_address_on_every_provider():
+    for make in (make_fixture, make_vultr):
+        assert tools.fallback_params(make()) == {"ip": "192.0.2.10", "user": "root", "sudoer": "root",
+                                                 "name": make()["profile"]}
+    # `name` is the resolved compute name, as the templates' params output is.
+    assert tools.fallback_params(make_fixture(**{"digitalocean-name": "analytics-1"}))["name"] == "analytics-1"
+    assert tools.fallback_params(make_optout())["name"] == "posthog-optout"
+
+
+def test_empty_http_sources_drop_the_public_rules():
+    # An empty list is allowed and means no public HTTP; DigitalOcean rejects
+    # an inbound rule with no sources, so the two rules are left out rather
+    # than rendered empty. A non-empty list renders exactly as before.
+    assert tools.infrastructure_data(make_fixture())["http-sources?"] is True
+    data = tools.infrastructure_data(make_fixture(**{"digitalocean-http-sources": []}))
+    assert data["http-sources?"] is False
+    assert data["http-sources-hcl"] == "[]"
+
+    def render(opts):
+        return render_template(tools.infrastructure_template(opts),
+                               tools.infrastructure_data(opts), tools.template_opts)
+    full = render(make_fixture())
+    none = render(make_fixture(**{"digitalocean-http-sources": []}))
+    assert len(re.findall(r"inbound_rule", full)) == 3
+    assert len(re.findall(r"inbound_rule", none)) == 1
+    assert 'port_range       = "22"' in none
+    assert "source_addresses = []" not in none
+    # The Vultr rules are a for_each over the set and vanish on their own.
+    vultr_none = render(make_vultr(**{"vultr-http-sources": []}))
+    assert "http_sources = []" in vultr_none
+    assert "for_each          = toset(local.http_sources)" in vultr_none
 
 
 def test_infrastructure_data_carries_the_ssh_mode_and_the_compute_name():

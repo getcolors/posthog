@@ -1,8 +1,94 @@
 import os
 
-from conftest import make_fixture, make_optout
+from conftest import SECRETS, make_fixture, make_optout, make_vultr
 from package_once_blue import ssh as once_ssh
 from package_posthog_blue import ssh, ssh_config, workflow
+
+
+def _stub_lifecycle(monkeypatch):
+    """Everything a real create or delete would do after the validators."""
+    async def passthrough(opts, _state_fn):
+        return opts
+    monkeypatch.setattr(ssh, "ensure_key", passthrough)
+    monkeypatch.setattr(ssh, "preflight", lambda o, *_: o)
+    monkeypatch.setattr(ssh_config, "preflight", lambda o: o)
+
+
+async def test_provider_switch_is_refused_on_create_and_delete_before_the_missing_token(monkeypatch):
+    # Compute Provider Standard §4: all providers share one state key, so a
+    # changed provider-compute on a profile with compute in state would plan a
+    # cross-provider replacement. Both events refuse; delete refuses because it
+    # would render and destroy the *selected* provider's template. The
+    # validator order is the thing under test: no missing-token entry for the
+    # newly selected provider appears beside the actionable error.
+    _stub_lifecycle(monkeypatch)
+
+    async def held_do(_opts):
+        return {"provider": "digitalocean", "ip": "203.0.113.7"}
+    monkeypatch.setattr(workflow, "state_output", held_do)
+    without_token = {k: v for k, v in SECRETS.items() if k != "vultr-api-key"}
+    for event in ("create", "delete"):
+        r = await workflow.start_step(make_vultr(**{**without_token, "blue/event": event,
+                                                    "compute-prevent-destroy": False}), env={})
+        assert r["blue/exit"] == 2, event
+        lines = r["blue/err"].split("\n")
+        assert "state holds a digitalocean machine; set provider-compute back to digitalocean and delete first" in lines
+        assert not any("COLORS_PAR_VULTR_API_KEY" in line for line in lines), event
+
+    async def held_vultr(_opts):
+        return {"provider": "vultr", "ip": "203.0.113.7"}
+    monkeypatch.setattr(workflow, "state_output", held_vultr)
+    for event in ("create", "delete"):
+        r = await workflow.start_step(make_fixture(**{**SECRETS, "blue/event": event,
+                                                      "compute-prevent-destroy": False}), env={})
+        assert "state holds a vultr machine; set provider-compute back to vultr and delete first" in r["blue/err"]
+
+
+async def test_legacy_state_without_a_provider_accepts_only_the_default(monkeypatch):
+    _stub_lifecycle(monkeypatch)
+
+    async def legacy(_opts):
+        return {"ip": "203.0.113.7"}
+    monkeypatch.setattr(workflow, "state_output", legacy)
+    for event in ("create", "delete"):
+        ok = await workflow.start_step(make_fixture(**{**SECRETS, "blue/event": event,
+                                                       "compute-prevent-destroy": False}), env={})
+        assert ok["blue/exit"] == 0, event
+        refused = await workflow.start_step(make_vultr(**{**SECRETS, "blue/event": event,
+                                                          "compute-prevent-destroy": False}), env={})
+        assert refused["blue/exit"] == 2, event
+        assert "set provider-compute back to digitalocean" in refused["blue/err"]
+
+
+async def test_unreadable_backend_is_no_state_on_create_and_fatal_on_delete(monkeypatch):
+    seen = {}
+
+    async def unauthorized(_opts):
+        raise Exception("Unauthorized")
+
+    async def record_state(opts, state_fn):
+        seen["state"] = await state_fn(opts)
+        return opts
+    monkeypatch.setattr(workflow, "state_output", unauthorized)
+    monkeypatch.setattr(ssh, "ensure_key", record_state)
+    monkeypatch.setattr(ssh, "preflight", lambda o, *_: o)
+    monkeypatch.setattr(ssh_config, "preflight", lambda o: o)
+    for make in (make_fixture, make_vultr):
+        created = await workflow.start_step(make(**{**SECRETS, "blue/event": "create"}), env={})
+        assert created["blue/exit"] == 0
+        assert seen["state"] is None
+        deleted = await workflow.start_step(make(**{**SECRETS, "blue/event": "delete",
+                                                    "compute-prevent-destroy": False}), env={})
+        assert deleted["blue/exit"] == 1
+        assert "could not read the infrastructure state for the delete cleanup" in deleted["blue/err"]
+        assert "Unauthorized" in deleted["blue/err"]
+
+
+async def test_real_create_requires_the_selected_provider_credentials():
+    r = await workflow.start_step(make_vultr(**{"blue/event": "create"}), env={})
+    assert r["blue/exit"] == 2
+    assert "COLORS_PAR_VULTR_API_KEY" in r["blue/err"]
+    assert "COLORS_PAR_DO_TOKEN" not in r["blue/err"]
 
 
 async def test_build_and_dry_run_never_touch_ssh(monkeypatch):
@@ -78,19 +164,59 @@ async def test_delete_fails_loudly_when_state_is_unreadable(monkeypatch):
     r = await workflow.start_step(deletable_fixture(**{"blue/event": "delete"}), env={})
     assert r["blue/exit"] == 1
     assert "Unauthorized" in r["blue/err"]
-    assert "COLORS_PAR_IP" in r["blue/err"]
+    assert "could not read the infrastructure state for the delete cleanup" in r["blue/err"]
 
 
-async def test_delete_with_explicit_ip_skips_the_state_read(monkeypatch):
-    # COLORS_PAR_IP is the operator's escape hatch when the state backend is
-    # unreachable; it must not require the read it exists to replace.
-    async def boom(_opts):
-        raise AssertionError("must not be called")
-    monkeypatch.setattr(workflow, "state_output", boom)
-    r = await workflow.start_step(deletable_fixture(**{"blue/event": "delete",
-                                                       "ip": "203.0.113.7"}), env={})
+async def test_explicit_ip_never_skips_the_read_or_the_provider_guard(monkeypatch):
+    # COLORS_PAR_IP replaces a stale recorded address once the read succeeded;
+    # it is not a way around the read, the fail-closed rule, or the provider
+    # guard (Compute Provider Standard §4).
+    async def unauthorized(_opts):
+        raise Exception("Unauthorized")
+    monkeypatch.setattr(workflow, "state_output", unauthorized)
+    r = await workflow.start_step(deletable_fixture(**{"blue/event": "delete", "ip": "203.0.113.7"}), env={})
+    assert r["blue/exit"] == 1
+    assert "Unauthorized" in r["blue/err"]
+
+    async def held_vultr(_opts):
+        return {"provider": "vultr", "ip": "198.51.100.4"}
+    monkeypatch.setattr(workflow, "state_output", held_vultr)
+    r = await workflow.start_step(deletable_fixture(**{"blue/event": "delete", "ip": "203.0.113.7"}), env={})
+    assert r["blue/exit"] == 2
+    assert "state holds a vultr machine" in r["blue/err"]
+
+    async def held_do(_opts):
+        return {"provider": "digitalocean", "ip": "198.51.100.4"}
+    monkeypatch.setattr(workflow, "state_output", held_do)
+    r = await workflow.start_step(deletable_fixture(**{"blue/event": "delete", "ip": "203.0.113.7"}), env={})
     assert r["blue/exit"] == 0
-    assert r["ip"] == "203.0.113.7"
+    assert r["ip"] == "203.0.113.7", "the override wins over the recorded address after the read"
+
+
+async def test_state_is_read_once_per_run(monkeypatch):
+    # One read serves the provider validator, the key matrix and the adoption;
+    # a second read would be a second chance for the backend to disagree.
+    for event in ("create", "delete"):
+        reads = {"n": 0}
+
+        async def counted(_opts):
+            reads["n"] += 1
+            return {"provider": "digitalocean", "ip": "203.0.113.9"}
+
+        async def record(opts, state_fn):
+            return {**opts, "recorded": await state_fn(opts)}
+        monkeypatch.setattr(workflow, "state_output", counted)
+        monkeypatch.setattr(ssh, "ensure_key", record)
+        monkeypatch.setattr(ssh, "preflight", lambda o, *_: o)
+        monkeypatch.setattr(ssh_config, "preflight", lambda o: o)
+        r = await workflow.start_step(deletable_fixture(**{"blue/event": event,
+                                                           "compute-prevent-destroy": event == "create"}), env={})
+        assert r["blue/exit"] == 0, event
+        assert reads["n"] == 1, event
+        if event == "create":
+            assert r["recorded"]["ip"] == "203.0.113.9"
+        else:
+            assert r["ip"] == "203.0.113.9"
 
 
 async def test_delete_with_empty_state_proceeds_without_an_address(monkeypatch):

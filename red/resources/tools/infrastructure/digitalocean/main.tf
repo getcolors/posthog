@@ -52,7 +52,7 @@ resource "digitalocean_firewall" "posthog" {
     port_range       = "22"
     source_addresses = <{ ssh-sources-hcl|safe }>
   }
-  inbound_rule {
+<% if http-sources? %>  inbound_rule {
     protocol         = "tcp"
     port_range       = "80"
     source_addresses = <{ http-sources-hcl|safe }>
@@ -62,7 +62,7 @@ resource "digitalocean_firewall" "posthog" {
     port_range       = "443"
     source_addresses = <{ http-sources-hcl|safe }>
   }
-  outbound_rule {
+<% endif %>  outbound_rule {
     protocol              = "tcp"
     port_range            = "1-65535"
     destination_addresses = ["0.0.0.0/0", "::/0"]
@@ -81,11 +81,12 @@ resource "digitalocean_firewall" "posthog" {
 
 output "params" {
 <% if ssh-keygen %>  value = {
+    provider   = "digitalocean"
     ip         = digitalocean_droplet.posthog.ipv4_address
     user       = "root"
     sudoer     = "root"
-    name       = "<{ profile }>"
+    name       = "<{ compute-name }>"
     ssh_key_id = digitalocean_ssh_key.machine.id
   }
-<% else %>  value = { ip = digitalocean_droplet.posthog.ipv4_address, user = "root", sudoer = "root", name = "<{ profile }>" }
+<% else %>  value = { provider = "digitalocean", ip = digitalocean_droplet.posthog.ipv4_address, user = "root", sudoer = "root", name = "<{ compute-name }>" }
 <% endif %>}

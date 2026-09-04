@@ -25,9 +25,7 @@
 (defn spec [source target data] {:template source :target target :data data :opts template-opts})
 (defn raw-spec [target content] (sc/content-spec target content))
 
-(defn cidrs [opts k]
-  (let [v (get opts k) xs (if (sequential? v) v (str/split (str v) #"[,\s]+"))]
-    (->> xs (map (comp str/trim str)) (remove str/blank?) vec)))
+(defn cidrs [opts k] (validate/cidr-list (get opts k)))
 
 (defn credential-env [opts & slots]
   (not-empty
@@ -38,17 +36,32 @@
 (defn backend-credential-env [opts] (credential-env opts))
 
 (defn fallback-params [opts]
-  {:ip "192.0.2.10" :user "root" :sudoer "root" :name (:profile opts)})
+  {:ip "192.0.2.10" :user "root" :sudoer "root" :name (validate/compute-name opts)})
 
 (defn output-params [result]
   (some-> (get-in result [:tofu/outputs :params]) walk/keywordize-keys))
 
-(defn infrastructure-data [opts]
-  (assoc opts
-         :ssh-keygen (validate/keygen? opts)
-         :compute-name (validate/compute-name opts)
-         :ssh-sources-hcl (tofu/hcl-list (cidrs opts :digitalocean-ssh-sources))
-         :http-sources-hcl (tofu/hcl-list (cidrs opts :digitalocean-http-sources))))
+(defn infrastructure-data
+  "Template values for the compute stage. The source lists are read through
+   `compute-key`, so the same data serves every provider's template."
+  [opts]
+  (let [http-sources (cidrs opts (validate/compute-key opts "http-sources"))]
+    (assoc opts
+           :ssh-keygen (validate/keygen? opts)
+           :compute-name (validate/compute-name opts)
+           :ssh-sources-hcl (tofu/hcl-list (cidrs opts (validate/compute-key opts "ssh-sources")))
+           :http-sources-hcl (tofu/hcl-list http-sources)
+           ;; An empty http list means no public HTTP: the 80/443 rules are
+           ;; left out rather than rendered with an empty source list, which
+           ;; the DigitalOcean API rejects. Vultr's rules are a for_each over
+           ;; the set and vanish on their own.
+           :http-sources? (boolean (seq http-sources)))))
+
+(defn infrastructure-template
+  "Providers are selected by template directory, never by conditionals inside
+   one file (Compute Provider Standard §3): `tools/infrastructure/<provider>/`."
+  [opts]
+  (template (str "infrastructure." (:provider-compute opts)) "main.tf"))
 
 (defn resolved-compute
   "Refuse to hand 192.0.2.10 to Ansible. That is the documentation address the
@@ -64,7 +77,7 @@
 
 (defn infrastructure-step [opts]
   (let [dir (tool-dir opts infrastructure-tool)
-        specs [(spec (template "infrastructure" "main.tf") (str dir "/main.tf")
+        specs [(spec (infrastructure-template opts) (str dir "/main.tf")
                      (infrastructure-data opts))]
         result (tofu/tofu-with-spec opts specs
                                     {:dir dir :env (credential-env opts :provider-compute)})]

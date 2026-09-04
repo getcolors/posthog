@@ -47,9 +47,7 @@ def raw_spec(target: str, content: str) -> dict:
 
 
 def cidrs(opts: dict, k: str) -> list[str]:
-    v = opts.get(k)
-    xs = v if isinstance(v, (list, tuple)) else re.split(r"[,\s]+", str("" if v is None else v))
-    return [x for x in (str(item).strip() for item in xs) if x]
+    return validate.cidr_list(opts.get(k))
 
 
 def credential_env(opts: dict, *slots: str) -> dict[str, str] | None:
@@ -70,7 +68,7 @@ def backend_credential_env(opts: dict) -> dict[str, str] | None:
 
 def fallback_params(opts: dict) -> dict:
     return {"ip": "192.0.2.10", "user": "root", "sudoer": "root",
-            "name": opts.get("profile")}
+            "name": validate.compute_name(opts)}
 
 
 def output_params(result: dict) -> dict | None:
@@ -78,11 +76,27 @@ def output_params(result: dict) -> dict | None:
 
 
 def infrastructure_data(opts: dict) -> dict:
+    """Template values for the compute stage. The source lists are read
+    through `compute_key`, so the same data serves every provider's
+    template."""
+    http_sources = cidrs(opts, validate.compute_key(opts, "http-sources"))
     return {**opts,
             "ssh-keygen": validate.keygen(opts),
             "compute-name": validate.compute_name(opts),
-            "ssh-sources-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-ssh-sources")),
-            "http-sources-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-http-sources"))}
+            "ssh-sources-hcl": tofu.hcl_list(cidrs(opts, validate.compute_key(opts, "ssh-sources"))),
+            "http-sources-hcl": tofu.hcl_list(http_sources),
+            # An empty http list means no public HTTP: the 80/443 rules are
+            # left out rather than rendered with an empty source list, which
+            # the DigitalOcean API rejects. Vultr's rules are a for_each over
+            # the set and vanish on their own.
+            "http-sources?": len(http_sources) > 0}
+
+
+def infrastructure_template(opts: dict) -> dict:
+    """Providers are selected by template directory, never by conditionals
+    inside one file (Compute Provider Standard §3):
+    `tools/infrastructure/<provider>/`."""
+    return template(f"infrastructure.{opts.get('provider-compute')}", "main.tf")
 
 
 def resolved_compute(result: dict, fallback: dict, outputs: dict | None) -> dict:
@@ -99,7 +113,7 @@ def resolved_compute(result: dict, fallback: dict, outputs: dict | None) -> dict
 
 async def infrastructure_step(opts: dict) -> dict:
     dir = tool_dir(opts, infrastructure_tool)
-    specs = [spec(template("infrastructure", "main.tf"), f"{dir}/main.tf",
+    specs = [spec(infrastructure_template(opts), f"{dir}/main.tf",
                   infrastructure_data(opts))]
     result = await tofu.tofu_with_spec(opts, specs, dir=dir,
                                        env=credential_env(opts, "provider-compute"))

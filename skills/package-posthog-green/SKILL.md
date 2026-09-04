@@ -1,6 +1,6 @@
 ---
 name: package-posthog-green
-description: Provisions and operates a single-node PostHog product analytics suite with PostgreSQL 17, ClickHouse 24.8, Redis 7.2, and Caddy on DigitalOcean.
+description: Provisions and operates a single-node PostHog product analytics suite with PostgreSQL 17, ClickHouse, Redis 7.2, and Caddy on one DigitalOcean Droplet or Vultr instance.
 license: MIT
 ---
 
@@ -9,6 +9,17 @@ license: MIT
 Operate one PostHog deployment from non-secret `colors.yml`. Read
 [references/configuration.md](references/configuration.md) before changing
 configuration or running a lifecycle operation.
+
+## Compute providers
+
+`provider-compute` selects `digitalocean` (the default; `COLORS_PAR_DO_TOKEN`,
+`digitalocean-region`, `-size`, `-image`, `-ssh-sources`, `-http-sources`) or
+`vultr` (`COLORS_PAR_VULTR_API_KEY`, `vultr-region`, `-plan`, `-os-id`,
+`-ssh-sources`, `-http-sources`). Keys of the unselected provider are ignored,
+so one `colors.yml` can carry both. Switching providers is a rebuild, never an
+apply: with a machine in state the package refuses both `create` and `delete`
+until `provider-compute` is set back to the recorded provider and the
+deployment deleted first.
 
 ## Safety
 
@@ -27,19 +38,20 @@ configuration or running a lifecycle operation.
 ## The machine keypair
 
 The deployment owns its SSH key per the workspace SSH Keypair Standard. With no
-`digitalocean-ssh-keys` in `colors.yml`, the first real `create` generates
-`~/.ssh/<profile>`, registers it at DigitalOcean under the profile name, and a
-successful `delete` removes it last.
+`<provider>-ssh-keys` (`digitalocean-ssh-keys` or `vultr-ssh-keys`) in
+`colors.yml`, the first real `create` generates `~/.ssh/<profile>`, registers
+it at the provider under the profile name, and a successful `delete` removes it
+last.
 
 The key lives outside the checkout, so cloning the deployment repository
 elsewhere does not carry access — copy `~/.ssh/<profile>`(`.pub`) deliberately.
-A key with no state, or a DigitalOcean key named after the profile that this
+A key with no state, or a provider key named after the profile that this
 deployment's state does not own, stops the run: verify at the provider before
 removing anything, and never delete a key whose fingerprint is not yours.
-Rotation is a rebuild. Supplying `digitalocean-ssh-keys` opts out and the
+Rotation is a rebuild. Supplying `<provider>-ssh-keys` opts out and the
 package then touches no key material.
 
-The droplet is named after the profile; `digitalocean-name` is an optional
+The machine is named after the profile; `<provider>-name` is an optional
 override, not a required key.
 
 Convergence also writes a `~/.ssh/config` block, so reaching the host needs no

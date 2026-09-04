@@ -1,9 +1,11 @@
 // The deployment's machine keypair, per the workspace SSH Keypair Standard.
 //
 // The behaviour itself is ONCE's (red/src/ssh.ts in getcolors/once): keygen
-// mode when desired state carries no `digitalocean-ssh-keys`, an ed25519 key named
-// after the profile in `~/.ssh`, the create matrix, the DigitalOcean REST preflight,
-// and a cleanup that runs only after a successful destroy. Reusing it rather
+// mode when desired state carries no `<provider>-ssh-keys` for the selected
+// compute provider, an ed25519 key named after the profile in `~/.ssh`, the
+// create matrix, the provider REST preflight (DigitalOcean and Vultr alike,
+// with the token each one takes), and a cleanup that runs only after a
+// successful destroy. Reusing it rather
 // than reimplementing means one standard has one implementation, and a fix
 // upstream reaches this package when the pin moves. See once.ts for how the
 // unexported module is resolved.
@@ -48,7 +50,9 @@ export function withMachineKey(opts: Opts): Opts {
     ...filled,
     "ssh-private-key-path": prv,
     "ssh-public-key-path": pub,
-    "digitalocean-ssh-keys": pub,
+    // The selected provider's machine-key key, per ONCE's table, so the
+    // placeholder lands where that provider's template reads it.
+    [onceSsh.machineKeyKeys[String(opts["provider-compute"])]!]: pub,
   };
 }
 
@@ -57,7 +61,7 @@ export function ensureKey(opts: Opts, stateFn: StateFn, runFn?: Runner): Promise
   return onceSsh.ensureKey(opts, stateFn, runFn);
 }
 
-// Refuse a real create when the DigitalOcean account holds a key named after the
+// Refuse a real create when the provider account holds a key named after the
 // profile that this deployment's state does not own.
 export function preflight(opts: Opts, fetchFn?: FetchFn): Promise<Opts> {
   return onceSsh.preflight(opts, fetchFn);

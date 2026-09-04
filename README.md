@@ -2,8 +2,8 @@
 
 A reproducible tri-colour Package Skill — Clojure/Babashka (green),
 TypeScript/Bun (red), and Python/uv (blue) — for deploying and operating a
-single-node PostHog product analytics suite on DigitalOcean. Green is the
-canonical implementation; red and blue render byte-identical artifacts,
+single-node PostHog product analytics suite on DigitalOcean or Vultr. Green is
+the canonical implementation; red and blue render byte-identical artifacts,
 verified by `scripts/parity.sh`.
 
 ## Architecture
@@ -12,11 +12,17 @@ Ten containers, and none of them is optional. Upstream's own single-server
 topology is roughly thirty-five services; this is a deliberate reduction to the
 set that has to be present, not a copy.
 
-- **Compute** — one DigitalOcean Droplet (`s-4vcpu-8gb` in `ams3`) attached to
-  the regional default VPC, discovered at runtime, behind a provider firewall
-  opening 22/80/443, and — in keygen mode — the account SSH key named after
-  the profile. The droplet is named after the profile unless
-  `digitalocean-name` overrides it.
+- **Compute** — one machine on the provider `provider-compute` selects: a
+  DigitalOcean Droplet (`s-4vcpu-8gb` in `ams3`) attached to the regional
+  default VPC, discovered at runtime, or a Vultr instance (`vc2-4c-8gb` in
+  `ams`) with no VPC; either behind a provider firewall opening 22/80/443 and
+  — in keygen mode — the account SSH key named after the profile. The machine
+  is named after the profile unless `<provider>-name` overrides it. Each
+  provider has its own template directory; the registry in `validate` names
+  the credential and keys each one takes, and keys of the unselected provider
+  are ignored. Switching providers is a rebuild: with a machine in state, both
+  `create` and `delete` refuse until `provider-compute` is set back and the
+  deployment deleted first.
 - **Ingress & TLS** — Caddy terminating TLS on 80/443 with automated
   certificates. It splits ingestion paths to the capture service and everything
   else to the application.
@@ -62,8 +68,8 @@ Exit code 2 is a validation or usage failure and lists every problem at once.
 
 The deployment owns its machine key, per the workspace
 [SSH Keypair Standard](https://github.com/getcolors/workspace/blob/main/standards/ssh-keypair.md).
-Leave `digitalocean-ssh-keys` out of `colors.yml` and the package generates
-`~/.ssh/<profile>` on the first real `create`, registers it at DigitalOcean
+Leave `<provider>-ssh-keys` out of `colors.yml` and the package generates
+`~/.ssh/<profile>` on the first real `create`, registers it at the provider
 under the profile name, and deletes it after a successful `delete` — never
 before.
 
@@ -74,12 +80,12 @@ Consequences worth knowing before you clone a deployment elsewhere:
   `~/.ssh/<profile>`(`.pub`) deliberately when access should move.
 - A key on disk with no state is an error, never overwritten — it may be the
   only credential to a host that is still alive.
-- A DigitalOcean key named after the profile that this deployment's state does
+- A provider key named after the profile that this deployment's state does
   not own is an error too. If its fingerprint differs from yours, **do not
   delete it**.
-- Rotation is a rebuild: DigitalOcean key lists are ForceNew.
+- Rotation is a rebuild: machine key lists are ForceNew on both providers.
 
-Supplying `digitalocean-ssh-keys` opts out entirely; the package then
+Supplying `<provider>-ssh-keys` opts out entirely; the package then
 generates, validates, and deletes nothing.
 
 Convergence also writes a `~/.ssh/config` block per the
@@ -109,7 +115,8 @@ cd blue && uv run pytest
 ./scripts/launcher.sh
 ```
 
-`bb golden` renders two fixtures, because the SSH Keypair Standard has two
-modes: keygen (`test/fixtures/colors.yml`) and opt-out
-(`test/fixtures/optout.yml`). Read every golden diff after a pin bump. Never
-run `bb golden:accept` merely to make the suite pass.
+`bb golden` renders four fixtures — one per compute provider per SSH keypair
+mode: DigitalOcean keygen (`test/fixtures/colors.yml`) and opt-out
+(`optout.yml`), Vultr keygen (`colors-vultr.yml`) and opt-out
+(`optout-vultr.yml`). Read every golden diff after a pin bump. Never run
+`bb golden:accept` merely to make the suite pass.

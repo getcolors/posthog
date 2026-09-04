@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Provision and operate a private single-node PostHog product analytics suite with ClickHouse, Kafka, Temporal, capture and plugin server, Cloudflare HTTPS, and restore-verified R2 backups on one DigitalOcean Droplet.">
+  <meta name="description" content="Provision and operate a private single-node PostHog product analytics suite with ClickHouse, Kafka, Temporal, capture and plugin server, Cloudflare HTTPS, and restore-verified R2 backups on one DigitalOcean Droplet or Vultr instance.">
   <title>PostHog Package Skill — getcolors</title>
   <style>
     :root{color-scheme:light;--ink:#1f2328;--muted:#59636e;--line:#d0d7de;--soft:#f6f8fa;--blue:#0969da;--green:#1a7f37;--warn:#9a6700}*{box-sizing:border-box}body{margin:0;color:var(--ink);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:920px;margin:auto;padding:64px 28px 100px}h1{font-size:52px;line-height:1.05;margin:0}h2{margin-top:54px;padding-bottom:8px;border-bottom:1px solid var(--line)}h3{margin-top:30px}.lead{font-size:20px;color:var(--muted);max-width:790px}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{padding:18px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--soft)}:not(pre)>code{padding:.12em .35em;border-radius:5px;background:var(--soft)}a{color:var(--blue)}.eyebrow{color:var(--green);font-weight:700;letter-spacing:.08em}.callout{padding:16px 18px;border-left:4px solid var(--green);background:#dafbe1}.warning{border-color:var(--warn);background:#fff8c5}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{padding:18px;border:1px solid var(--line);border-radius:8px}.card h3{margin-top:0}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{padding:9px 12px;border:1px solid var(--line);text-align:left;vertical-align:top;font-size:14.5px}th{background:var(--soft)}@media(max-width:650px){main{padding-top:38px}.grid{grid-template-columns:1fr}h1{font-size:40px}}
@@ -13,7 +13,7 @@
 <script src="https://rybbit.getcolors.ai/api/script.js" data-site-id="9fb9c41a6d49" defer></script>
 </head>
 <body><main>
-  <p class="eyebrow">GREEN · RED · BLUE PACKAGE SKILL · DIGITALOCEAN · POSTHOG</p>
+  <p class="eyebrow">GREEN · RED · BLUE PACKAGE SKILL · DIGITALOCEAN · VULTR · POSTHOG</p>
   <h1>PostHog Package Skill</h1>
   <p class="lead">A reproducible Green, Red, and Blue workflow for one single-node PostHog product analytics suite: the Django application and Celery worker, ClickHouse with embedded Keeper, Redpanda, Temporal, the Rust capture service and the Node plugin server, behind Caddy with Cloudflare DNS and TLS.</p>
 
@@ -30,7 +30,7 @@ chmod +x green
 
   <h2>Architecture and components</h2>
   <div class="grid">
-    <div class="card"><h3>Compute</h3><p>OpenTofu discovers the configured region’s default VPC at plan time and creates one Ubuntu 24.04 Droplet, named after the profile, plus a firewall. No VPC is created and no VPC UUID belongs in desired state. With no <code>digitalocean-ssh-keys</code> the deployment owns its machine key: <code>~/.ssh/&lt;profile&gt;</code> is generated on the first create, registered under the profile name, and removed only after a successful delete.</p></div>
+    <div class="card"><h3>Compute</h3><p>One Ubuntu 24.04 machine, named after the profile, plus a provider firewall opening 22/80/443, on the provider <code>provider-compute</code> selects: a DigitalOcean Droplet attached to the region’s default VPC, discovered at plan time, or a Vultr instance with no VPC. Each provider has its own template directory; switching is a rebuild, never an apply. With no <code>digitalocean-ssh-keys</code> the deployment owns its machine key: <code>~/.ssh/&lt;profile&gt;</code> is generated on the first create, registered under the profile name, and removed only after a successful delete.</p></div>
     <div class="card"><h3>Public boundary</h3><p>Cloudflare publishes one proxied A record. Caddy sends <code>/capture</code>, <code>/e</code>, <code>/batch</code>, <code>/i/*</code>, <code>/track</code>, <code>/engage</code> and <code>/s</code> to the capture service, and everything else to the application.</p></div>
     <div class="card"><h3>Sizing</h3><p><code>s-8vcpu-16gb</code>. This is not the same shape as the other analytics packages: 8 GiB wedged the machine hard enough that <code>sshd</code> could not fork, and upstream’s own hobby minimum is 16 GiB.</p></div>
     <div class="card"><h3>Reproducibility</h3><p>The application and plugin server images are pinned to <strong>one commit</strong>. They share a Postgres schema, and floating tags on either side let the node process query columns the application’s migrations never created.</p></div>
@@ -51,10 +51,11 @@ chmod +x green
   <p>Redis is the broker, not a cache: upstream’s hobby compose caps it at 200 MB with <code>allkeys-lru</code>, which silently discards queued ingestion tasks under pressure. Here it refuses to evict. ClickHouse runs Keeper embedded rather than as a separate ZooKeeper, which is what makes <code>ReplicatedMergeTree</code> possible on one node.</p>
 
   <h2>Desired state and credentials</h2>
-  <p><code>colors.yml</code> is the only file you edit, and it holds non-secret values only: the profile, DigitalOcean region, size and SSH sources, the host, every image tag, the data directories, and the backup destination, schedule and retention. See the <a href="skills/package-posthog-green/references/configuration.md">configuration reference</a> for every key.</p>
+  <p><code>colors.yml</code> is the only file you edit, and it holds non-secret values only: the profile, the compute provider with its region, size and SSH sources, the host, every image tag, the data directories, and the backup destination, schedule and retention. See the <a href="skills/package-posthog-green/references/configuration.md">configuration reference</a> for every key.</p>
   <table>
     <tr><th>Variable</th><th>Purpose</th></tr>
-    <tr><td><code>COLORS_PAR_DO_TOKEN</code></td><td>DigitalOcean compute and firewall</td></tr>
+    <tr><td><code>COLORS_PAR_DO_TOKEN</code></td><td>DigitalOcean compute and firewall (<code>provider-compute: digitalocean</code>)</td></tr>
+    <tr><td><code>COLORS_PAR_VULTR_API_KEY</code></td><td>Vultr compute and firewall (<code>provider-compute: vultr</code>)</td></tr>
     <tr><td><code>COLORS_PAR_CLOUDFLARE_API_TOKEN</code></td><td>DNS record for the configured host</td></tr>
     <tr><td><code>COLORS_PAR_POSTHOG_SECRET_KEY</code></td><td>Django signing key; signs sessions and password-reset tokens</td></tr>
     <tr><td><code>COLORS_PAR_POSTHOG_POSTGRES_PASSWORD</code></td><td>PostgreSQL password, percent-encoded into <code>DATABASE_URL</code></td></tr>

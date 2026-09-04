@@ -25,7 +25,8 @@ import ansibleCompose from "../resources/tools/ansible/compose.yml" with { type:
 import ansibleMain from "../resources/tools/ansible/main.yml" with { type: "text" };
 import ansibleOwner from "../resources/tools/ansible/owner.py" with { type: "text" };
 import dnsMainTf from "../resources/tools/dns/main.tf" with { type: "text" };
-import infrastructureMainTf from "../resources/tools/infrastructure/main.tf" with { type: "text" };
+import infrastructureDigitaloceanTf from "../resources/tools/infrastructure/digitalocean/main.tf" with { type: "text" };
+import infrastructureVultrTf from "../resources/tools/infrastructure/vultr/main.tf" with { type: "text" };
 
 export const infrastructureTool = "posthog-infrastructure";
 export const dnsTool = "posthog-dns";
@@ -53,7 +54,8 @@ const templates: Record<string, string> = {
   "ansible/main.yml": ansibleMain,
   "ansible/owner.py": ansibleOwner,
   "dns/main.tf": dnsMainTf,
-  "infrastructure/main.tf": infrastructureMainTf,
+  "infrastructure/digitalocean/main.tf": infrastructureDigitaloceanTf,
+  "infrastructure/vultr/main.tf": infrastructureVultrTf,
 };
 
 export function template(path: string, file: string): Template {
@@ -70,9 +72,7 @@ function spec(source: Template, target: string, data: Opts): Spec {
 const rawSpec = (target: string, content: string): Spec => contentSpec(target, content);
 
 export function cidrs(opts: Opts, k: string): string[] {
-  const v = opts[k];
-  const xs = Array.isArray(v) ? v : String(v ?? "").split(/[,\s]+/);
-  return xs.map((x) => String(x).trim()).filter((x) => x.length > 0);
+  return validate.cidrList(opts[k]);
 }
 
 export function credentialEnv(opts: Opts, ...slots: string[]): Record<string, string> | undefined {
@@ -93,7 +93,7 @@ export function backendCredentialEnv(opts: Opts): Record<string, string> | undef
 }
 
 export function fallbackParams(opts: Opts): Opts {
-  return { ip: "192.0.2.10", user: "root", sudoer: "root", name: opts.profile };
+  return { ip: "192.0.2.10", user: "root", sudoer: "root", name: validate.computeName(opts) };
 }
 
 export function outputParams(result: Opts): Opts | undefined {
@@ -101,14 +101,28 @@ export function outputParams(result: Opts): Opts | undefined {
   return output?.params as Opts | undefined;
 }
 
+// Template values for the compute stage. The source lists are read through
+// `computeKey`, so the same data serves every provider's template.
 export function infrastructureData(opts: Opts): Opts {
+  const httpSources = cidrs(opts, validate.computeKey(opts, "http-sources"));
   return {
     ...opts,
     "ssh-keygen": validate.keygen(opts),
     "compute-name": validate.computeName(opts),
-    "ssh-sources-hcl": tofu.hclList(cidrs(opts, "digitalocean-ssh-sources")),
-    "http-sources-hcl": tofu.hclList(cidrs(opts, "digitalocean-http-sources")),
+    "ssh-sources-hcl": tofu.hclList(cidrs(opts, validate.computeKey(opts, "ssh-sources"))),
+    "http-sources-hcl": tofu.hclList(httpSources),
+    // An empty http list means no public HTTP: the 80/443 rules are left out
+    // rather than rendered with an empty source list, which the DigitalOcean
+    // API rejects. Vultr's rules are a for_each over the set and vanish on
+    // their own.
+    "http-sources?": httpSources.length > 0,
   };
+}
+
+// Providers are selected by template directory, never by conditionals inside
+// one file (Compute Provider Standard §3): `tools/infrastructure/<provider>/`.
+export function infrastructureTemplate(opts: Opts): Template {
+  return template(`infrastructure.${opts["provider-compute"]}`, "main.tf");
 }
 
 // Refuse to hand 192.0.2.10 to Ansible. That is the documentation address the
@@ -126,7 +140,7 @@ export function resolvedCompute(result: Opts, fallback: Opts, outputs: Opts | un
 
 export async function infrastructureStep(opts: Opts): Promise<Opts> {
   const dir = toolDir(opts, infrastructureTool);
-  const specs = [spec(template("infrastructure", "main.tf"), `${dir}/main.tf`,
+  const specs = [spec(infrastructureTemplate(opts), `${dir}/main.tf`,
     infrastructureData(opts))];
   const result = await tofu.tofuWithSpec(opts, specs,
     { dir, env: credentialEnv(opts, "provider-compute") });
