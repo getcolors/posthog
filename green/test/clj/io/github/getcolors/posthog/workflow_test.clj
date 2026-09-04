@@ -38,21 +38,29 @@
       (is (= "58495393" (:digitalocean-ssh-keys result)))
       (is (nil? (:ssh-keygen result))))))
 
-(defn- start-with-no-state
-  "A real event on a fresh deployment: the state read finds nothing recorded.
-  Stubbed, so the validators under test never run `tofu output`."
-  [opts]
-  (with-redefs [workflow/state-output (fn [_] nil)]
-    (workflow/start-step opts {})))
-
 (deftest real-create-requires-credentials
-  (let [r (start-with-no-state (assoc (fixture) :green/event :create))]
+  (let [r (workflow/start-step (assoc (fixture) :green/event :create) {})]
     (is (= 2 (:green/exit r)))
     (is (str/includes? (:green/err r) "COLORS_PAR_DO_TOKEN"))
     (is (str/includes? (:green/err r) "COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY"))))
 
+(deftest a-real-create-on-a-fresh-work-directory-reports-the-credentials-not-a-crash
+  ;; A fresh clone has no stage directory at all, so the one state read runs
+  ;; `tofu output` somewhere that does not exist. The SDK reports that as a
+  ;; launch failure, which ONCE's `read-state` must count as an unreadable
+  ;; backend — no state on a create — rather than let it propagate: the run
+  ;; then reaches the validators and names the missing credentials. Nothing is
+  ;; stubbed here on purpose; this is the path a first `create` takes.
+  (let [workdir (str (fs/create-temp-dir {:prefix "posthog-fresh"}))]
+    (try
+      (let [r (workflow/start-step (assoc (fixture) :green/event :create :workdir workdir) {})]
+        (is (= 2 (:green/exit r)))
+        (is (str/includes? (:green/err r) "COLORS_PAR_DO_TOKEN"))
+        (is (not (str/includes? (str (:green/err r)) "could not read"))))
+      (finally (fs/delete-tree workdir)))))
+
 (deftest delete-is-protected
-  (let [r (start-with-no-state (assoc (fixture) :green/event :delete))]
+  (let [r (workflow/start-step (assoc (fixture) :green/event :delete) {})]
     (is (= 2 (:green/exit r)))
     (is (str/includes? (:green/err r) "COMPUTE_PREVENT_DESTROY"))))
 
@@ -272,7 +280,7 @@
         (is (str/includes? (:green/err r) "Unauthorized"))))))
 
 (deftest real-create-requires-the-selected-provider-credentials
-  (let [r (start-with-no-state (assoc (vultr) :green/event :create))]
+  (let [r (workflow/start-step (assoc (vultr) :green/event :create) {})]
     (is (= 2 (:green/exit r)))
     (is (str/includes? (:green/err r) "COLORS_PAR_VULTR_API_KEY"))
     (is (not (str/includes? (:green/err r) "COLORS_PAR_DO_TOKEN")))))

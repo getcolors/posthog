@@ -87,16 +87,7 @@ async def test_unreadable_backend_is_no_state_on_create_and_fatal_on_delete(monk
         assert "Unauthorized" in deleted["blue/err"]
 
 
-def _no_state(monkeypatch):
-    """A real event on a fresh deployment: the state read finds nothing
-    recorded. Stubbed, so the validators under test never run `tofu output`."""
-    async def nothing(_opts):
-        return None
-    monkeypatch.setattr(workflow, "state_output", nothing)
-
-
-async def test_real_create_requires_the_selected_provider_credentials(monkeypatch):
-    _no_state(monkeypatch)
+async def test_real_create_requires_the_selected_provider_credentials():
     r = await workflow.start_step(make_vultr(**{"blue/event": "create"}), env={})
     assert r["blue/exit"] == 2
     assert "COLORS_PAR_VULTR_API_KEY" in r["blue/err"]
@@ -138,16 +129,27 @@ async def test_build_and_dry_run_need_no_credentials():
     assert r["blue/exit"] == 0
 
 
-async def test_real_create_requires_credentials(monkeypatch):
-    _no_state(monkeypatch)
+async def test_real_create_requires_credentials():
     r = await workflow.start_step(make_fixture(**{"blue/event": "create"}), env={})
     assert r["blue/exit"] == 2
     assert "COLORS_PAR_DO_TOKEN" in r["blue/err"]
     assert "COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY" in r["blue/err"]
 
 
-async def test_delete_is_protected(monkeypatch):
-    _no_state(monkeypatch)
+async def test_a_real_create_on_a_fresh_work_directory_reports_the_credentials_not_a_crash(tmp_path):
+    # A fresh clone has no stage directory at all, so the one state read runs
+    # `tofu output` somewhere that does not exist. The SDK reports that as a
+    # StepError, which ONCE's `read_state` counts as an unreadable backend —
+    # no state on a create — so the run reaches the validators and names the
+    # missing credentials. Nothing is stubbed here on purpose; this is the
+    # path a first `create` takes.
+    r = await workflow.start_step(make_fixture(**{"blue/event": "create", "workdir": str(tmp_path)}), env={})
+    assert r["blue/exit"] == 2
+    assert "COLORS_PAR_DO_TOKEN" in r["blue/err"]
+    assert "could not read" not in r["blue/err"]
+
+
+async def test_delete_is_protected():
     r = await workflow.start_step(make_fixture(**{"blue/event": "delete"}), env={})
     assert r["blue/exit"] == 2
     assert "COMPUTE_PREVENT_DESTROY" in r["blue/err"]

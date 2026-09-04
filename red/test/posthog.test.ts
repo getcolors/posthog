@@ -785,19 +785,28 @@ describe("workflow", () => {
       fixture({ "red/event": "create", "red/dry-run": true }), {}))["red/exit"]).toBe(0);
   });
 
-  // A real event on a fresh deployment: the state read finds nothing recorded.
-  // Injected, so the validators under test never run `tofu output`.
-  const noState = async () => undefined;
-
   test("real create requires credentials", async () => {
-    const r = await workflow.startStep(fixture({ "red/event": "create" }), {}, noState);
+    const r = await workflow.startStep(fixture({ "red/event": "create" }), {});
     expect(r["red/exit"]).toBe(2);
     expect(String(r["red/err"])).toContain("COLORS_PAR_DO_TOKEN");
     expect(String(r["red/err"])).toContain("COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY");
   });
 
+  test("a real create on a fresh work directory reports the credentials, not a crash", async () => {
+    // A fresh clone has no stage directory at all, so the one state read runs
+    // `tofu output` somewhere that does not exist. The SDK reports that as a
+    // StepError, which ONCE's `readState` counts as an unreadable backend —
+    // no state on a create — so the run reaches the validators and names the
+    // missing credentials. Nothing is stubbed here on purpose; this is the
+    // path a first `create` takes.
+    const r = await workflow.startStep(fixture({ "red/event": "create", workdir: tempWorkdir() }), {});
+    expect(r["red/exit"]).toBe(2);
+    expect(String(r["red/err"])).toContain("COLORS_PAR_DO_TOKEN");
+    expect(String(r["red/err"])).not.toContain("could not read");
+  });
+
   test("delete is protected", async () => {
-    const r = await workflow.startStep(fixture({ "red/event": "delete" }), {}, noState);
+    const r = await workflow.startStep(fixture({ "red/event": "delete" }), {});
     expect(r["red/exit"]).toBe(2);
     expect(String(r["red/err"])).toContain("COMPUTE_PREVENT_DESTROY");
   });
@@ -939,7 +948,7 @@ describe("workflow", () => {
   });
 
   test("a real create requires the selected provider credentials", async () => {
-    const r = await workflow.startStep(vultr({ "red/event": "create" }), {}, noState);
+    const r = await workflow.startStep(vultr({ "red/event": "create" }), {});
     expect(r["red/exit"]).toBe(2);
     expect(String(r["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
     expect(String(r["red/err"])).not.toContain("COLORS_PAR_DO_TOKEN");
