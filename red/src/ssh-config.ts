@@ -19,7 +19,7 @@ import type { Opts } from "red/workflow";
 // The profile, unchanged. Standard §2: the profile already keys remote state,
 // which is what makes it unique enough to name a host by.
 export function hostAlias(opts: Opts): string {
-  return String(opts.profile ?? "posthog");
+  return String(opts.profile || "posthog");
 }
 
 // `~/.ssh/<profile>`, written with a literal tilde rather than an expanded

@@ -28,7 +28,10 @@
   (str "~/.ssh/" (host-alias opts)))
 
 (defn config-path []
-  (io/file (System/getProperty "user.home") ".ssh" "config"))
+  ;; $HOME first, the way the local play's `~` and the red and blue twins
+  ;; resolve it, so the preflight reads the file Ansible will edit; the JVM's
+  ;; user.home comes from the passwd entry and can differ.
+  (io/file (or (not-empty (System/getenv "HOME")) (System/getProperty "user.home")) ".ssh" "config"))
 
 ;; The alias alone. A profile is `<package>-<suffix>`, so it already names the
 ;; package, and two packages sharing one profile would be fighting over
