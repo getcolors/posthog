@@ -8,9 +8,14 @@ import * as tofu from "red/tofu";
 import { runtime } from "red/runtime";
 import type { Opts } from "red/workflow";
 import { StepError, failed } from "red/workflow";
+import * as ssh from "./ssh.ts";
+import * as sshConfig from "./ssh-config.ts";
 import * as utils from "./utils.ts";
 import * as validate from "./validate.ts";
 
+import ansibleLocalCfg from "../resources/tools/ansible-local/ansible.cfg" with { type: "text" };
+import ansibleLocalInventory from "../resources/tools/ansible-local/inventory.ini" with { type: "text" };
+import ansibleLocalMain from "../resources/tools/ansible-local/main.yml" with { type: "text" };
 import ansibleCaddyfile from "../resources/tools/ansible/Caddyfile" with { type: "text" };
 import ansibleCfg from "../resources/tools/ansible/ansible.cfg" with { type: "text" };
 import ansibleBackup from "../resources/tools/ansible/backup" with { type: "text" };
@@ -25,6 +30,7 @@ import infrastructureMainTf from "../resources/tools/infrastructure/main.tf" wit
 export const infrastructureTool = "posthog-infrastructure";
 export const dnsTool = "posthog-dns";
 export const ansibleTool = "posthog-ansible";
+export const ansibleLocalTool = "posthog-ansible-local";
 
 export const templateOpts = PRESERVE_JINJA_DELIMITERS;
 
@@ -35,6 +41,9 @@ export function toolDir(opts: Opts, tool: string): string {
 // The template tree this colour carries, keyed the way green names its
 // classpath resources: "<path>/<file>" with dots as directories.
 const templates: Record<string, string> = {
+  "ansible-local/ansible.cfg": ansibleLocalCfg,
+  "ansible-local/inventory.ini": ansibleLocalInventory,
+  "ansible-local/main.yml": ansibleLocalMain,
   "ansible/Caddyfile": ansibleCaddyfile,
   "ansible/ansible.cfg": ansibleCfg,
   "ansible/backup": ansibleBackup,
@@ -95,6 +104,8 @@ export function outputParams(result: Opts): Opts | undefined {
 export function infrastructureData(opts: Opts): Opts {
   return {
     ...opts,
+    "ssh-keygen": validate.keygen(opts),
+    "compute-name": validate.computeName(opts),
     "ssh-sources-hcl": tofu.hclList(cidrs(opts, "digitalocean-ssh-sources")),
     "http-sources-hcl": tofu.hclList(cidrs(opts, "digitalocean-http-sources")),
   };
@@ -207,6 +218,50 @@ function pretty(value: unknown, indent = 0): string {
   return JSON.stringify(value ?? null);
 }
 
+// --- ~/.ssh/config (local) ---------------------------------------------------
+
+// Only what a `build` genuinely knows. The address, the user and the alias are
+// run-time facts and reach the play as extra-vars instead, so the rendered
+// playbook carries no IP and is identical on every workstation (SSH Config
+// Standard §6).
+export function ansibleLocalData(opts: Opts): Opts {
+  return {
+    ...opts,
+    "ssh-keygen": validate.keygen(opts),
+    "ssh-config-identity-file": sshConfig.identityFile(opts),
+  };
+}
+
+export function ansibleLocalSpecs(opts: Opts): Spec[] {
+  const dir = toolDir(opts, ansibleLocalTool);
+  const data = ansibleLocalData(opts);
+  return [
+    spec(template("ansible-local", "ansible.cfg"), `${dir}/ansible.cfg`, data),
+    spec(template("ansible-local", "inventory.ini"), `${dir}/inventory.ini`, data),
+    spec(template("ansible-local", "main.yml"), `${dir}/main.yml`, data),
+  ];
+}
+
+// Write or remove the `~/.ssh/config` block. The same playbook serves both
+// events; `block_state` is what distinguishes them.
+export async function ansibleLocalStep(opts: Opts): Promise<Opts> {
+  const dir = toolDir(opts, ansibleLocalTool);
+  const isDelete = opts["red/event"] === "delete";
+  return ansible.ansibleWithSpec(opts, {
+    dir,
+    inventory: "inventory.ini",
+    playbooks: { create: "main.yml", delete: "main.yml" },
+    extraVars: {
+      host_alias: sshConfig.hostAlias(opts),
+      ip: opts.ip ?? fallbackParams(opts).ip,
+      user: opts.user ?? "root",
+      block_state: isDelete ? "absent" : "present",
+    },
+  }, ansibleLocalSpecs(opts));
+}
+
+// --- Ansible -----------------------------------------------------------------
+
 export function inventory(opts: Opts): string {
   return pretty({
     all: {
@@ -224,10 +279,14 @@ export function inventory(opts: Opts): string {
   });
 }
 
+// Template values for the Ansible stage. `ssh-private-key-path` reaches
+// ansible.cfg so convergence uses the deployment's own key in keygen mode,
+// where nothing guarantees an agent holds it.
 export function ansibleData(opts: Opts): Opts {
   return {
     ...opts,
     ip: opts.ip ?? "192.0.2.10",
+    "ssh-keygen": validate.keygen(opts),
     "posthog-web-port": opts["posthog-web-port"] ?? 8000,
     "posthog-backup-access-key": "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID') }}",
     "posthog-backup-secret-key": "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY') }}",
@@ -289,23 +348,26 @@ export async function httpStatus(args: string[]): Promise<string | undefined> {
   return r.exit === 0 ? r.out.trim() : undefined;
 }
 
-export async function sshOut(ip: unknown, command: string, timeout: number): Promise<string | undefined> {
+// Run `command` on the instance over ssh. In keygen mode the deployment's own
+// key is selected explicitly (`ssh.identityArgs`), because nothing guarantees
+// an agent holds it.
+export async function sshOut(opts: Opts, command: string, timeout: number): Promise<string | undefined> {
   const r = await runtime.exec(
     ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-      `root@${ip}`, command], { timeoutMs: timeout });
+      ...ssh.identityArgs(opts), `root@${opts.ip}`, command], { timeoutMs: timeout });
   return r.exit === 0 ? r.out.trim() : undefined;
 }
 
-export async function psql(ip: unknown, query: string): Promise<string | undefined> {
-  const s = String((await sshOut(ip, "cd /opt/posthog && docker compose exec -T db psql -U posthog" +
+export async function psql(opts: Opts, query: string): Promise<string | undefined> {
+  const s = String((await sshOut(opts, "cd /opt/posthog && docker compose exec -T db psql -U posthog" +
     ` -d posthog -tAc '${query}'`, 30000)) ?? "");
   return s.length ? s : undefined;
 }
 
 // Resolve the events table from system.tables so the check does not hardcode a
 // database name PostHog's migrations own, then run `query` against it.
-export async function clickhouse(ip: unknown, query: string): Promise<string | undefined> {
-  const s = String((await sshOut(ip, "cd /opt/posthog && " +
+export async function clickhouse(opts: Opts, query: string): Promise<string | undefined> {
+  const s = String((await sshOut(opts, "cd /opt/posthog && " +
     "t=$(docker compose exec -T clickhouse clickhouse-client" +
     " --query \"SELECT database || '.' || name FROM system.tables" +
     " WHERE name = 'events' AND database NOT IN ('system')" +
@@ -315,12 +377,12 @@ export async function clickhouse(ip: unknown, query: string): Promise<string | u
   return s.length ? s : undefined;
 }
 
-export async function eventCount(ip: unknown): Promise<number | undefined> {
-  return parseLong(await clickhouse(ip, "SELECT count() FROM $t"));
+export async function eventCount(opts: Opts): Promise<number | undefined> {
+  return parseLong(await clickhouse(opts, "SELECT count() FROM $t"));
 }
 
-export async function projectApiKey(ip: unknown): Promise<string | undefined> {
-  return psql(ip, "select api_token from posthog_team order by id limit 1");
+export async function projectApiKey(opts: Opts): Promise<string | undefined> {
+  return psql(opts, "select api_token from posthog_team order by id limit 1");
 }
 
 export async function waitHealth(url: string, attempts: number): Promise<boolean> {
@@ -355,9 +417,9 @@ export function ingestionVerdict(status: unknown, before: unknown, after: unknow
 
 // Capture is asynchronous through the Celery worker, so poll rather than
 // sampling once.
-export async function waitIngested(ip: unknown, baseline: number, attempts: number): Promise<number | undefined> {
+export async function waitIngested(opts: Opts, baseline: number, attempts: number): Promise<number | undefined> {
   for (let n = attempts; ; n -= 1) {
-    const after = await eventCount(ip);
+    const after = await eventCount(opts);
     if (typeof after === "number" && after > baseline) return after;
     if (n <= 0) return after;
     await sleep(5000);
@@ -370,8 +432,8 @@ export const rcloneEnv =
 
 export interface BackupEntry { Size?: number; ModTime?: string }
 
-export async function backupListing(opts: Opts, ip: unknown): Promise<BackupEntry[] | undefined> {
-  const out = await sshOut(ip, "set -a; . /etc/posthog-backup.env; set +a; " + rcloneEnv +
+export async function backupListing(opts: Opts): Promise<BackupEntry[] | undefined> {
+  const out = await sshOut(opts, "set -a; . /etc/posthog-backup.env; set +a; " + rcloneEnv +
     " RCLONE_CONFIG_R2_ACCESS_KEY_ID=\"$POSTHOG_BACKUP_R2_ACCESS_KEY_ID\"" +
     " RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=\"$POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY\"" +
     ` RCLONE_CONFIG_R2_ENDPOINT="${opts["posthog-backup-r2-endpoint"]}"` +
@@ -397,8 +459,8 @@ export function freshBackup(entries: BackupEntry[] | undefined, since: number): 
   }));
 }
 
-export async function runBackup(ip: unknown): Promise<string | undefined> {
-  return sshOut(ip, "systemctl start posthog-backup.service && systemctl is-active posthog-backup.timer",
+export async function runBackup(opts: Opts): Promise<string | undefined> {
+  return sshOut(opts, "systemctl start posthog-backup.service && systemctl is-active posthog-backup.timer",
     600000);
 }
 
@@ -406,8 +468,8 @@ export async function runBackup(ip: unknown): Promise<string | undefined> {
 // async migration is still pending. A pending one stops the worker starting at
 // all, and the ingestion path this step already exercises never touches Celery
 // -- so background jobs can be entirely dead while capture works.
-export async function backgroundJobs(ip: unknown): Promise<string | undefined> {
-  return sshOut(ip, "cd /opt/posthog && docker compose exec -T web python manage.py shell -c " +
+export async function backgroundJobs(opts: Opts): Promise<string | undefined> {
+  return sshOut(opts, "cd /opt/posthog && docker compose exec -T web python manage.py shell -c " +
     "\"from posthog.utils import is_celery_alive; " +
     "from posthog.models.async_migration import AsyncMigration; " +
     "print('celery=%s pending=%d' % (is_celery_alive(), " +
@@ -426,7 +488,6 @@ export function backgroundVerdict(out: unknown): string {
 export async function acceptanceStep(opts: Opts): Promise<Opts> {
   if (opts["red/event"] !== "create") return { ...opts, "red/exit": 0 };
   const base = `https://${opts["posthog-host"]}`;
-  const ip = opts.ip;
   const since = Date.now() - 120000;
   if (!(await waitHealth(base, 60))) {
     return {
@@ -434,8 +495,8 @@ export async function acceptanceStep(opts: Opts): Promise<Opts> {
       "red/err": "HTTPS health did not become ready with a valid certificate",
     };
   }
-  const apiKey = await projectApiKey(ip);
-  const before = await eventCount(ip);
+  const apiKey = await projectApiKey(opts);
+  const before = await eventCount(opts);
   if (typeof before !== "number") {
     return {
       ...opts, "red/exit": 1,
@@ -444,8 +505,8 @@ export async function acceptanceStep(opts: Opts): Promise<Opts> {
   }
   const verdict = !apiKey
     ? "not-configured"
-    : ingestionVerdict(await sendEvent(base, apiKey), before, await waitIngested(ip, before, 12));
-  const background = backgroundVerdict(await backgroundJobs(ip));
+    : ingestionVerdict(await sendEvent(base, apiKey), before, await waitIngested(opts, before, 12));
+  const background = backgroundVerdict(await backgroundJobs(opts));
   if (["dropped", "rejected", "unreachable"].includes(verdict)) {
     return {
       ...opts, "red/exit": 1,
@@ -458,10 +519,10 @@ export async function acceptanceStep(opts: Opts): Promise<Opts> {
       "red/err": `background jobs are not healthy: ${background}`,
     };
   }
-  if ((await runBackup(ip)) == null) {
+  if ((await runBackup(opts)) == null) {
     return { ...opts, "red/exit": 1, "red/err": "backup unit or timer is not healthy" };
   }
-  if (!freshBackup(await backupListing(opts, ip), since)) {
+  if (!freshBackup(await backupListing(opts), since)) {
     return {
       ...opts, "red/exit": 1,
       "red/err": `no backup object newer than this run under r2:${opts["posthog-backup-r2-bucket"]}/${opts.profile}`,

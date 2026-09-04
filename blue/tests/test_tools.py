@@ -8,7 +8,7 @@ from blue.cli import load_yaml
 from blue.runtime import runtime
 from blue.runtime import ExecResult
 
-from conftest import FIXTURE_FILE, make_fixture
+from conftest import FIXTURE_FILE, make_fixture, make_optout
 from package_posthog_blue import tools
 
 RESOURCES = Path(tools.__file__).parent / "resources" / "tools"
@@ -53,6 +53,42 @@ async def test_delete_cleanup_targets_the_adopted_address(monkeypatch):
 def test_infrastructure_discovers_default_vpc():
     data = tools.infrastructure_data(make_fixture())
     assert tools.cidrs(data, "digitalocean-http-sources") == ["0.0.0.0/0", "::/0"]
+
+
+def test_infrastructure_data_carries_the_ssh_mode_and_the_compute_name():
+    assert tools.infrastructure_data(make_fixture())["ssh-keygen"] is True
+    assert tools.infrastructure_data(make_optout())["ssh-keygen"] is False
+    assert tools.infrastructure_data(make_fixture())["compute-name"] == "posthog-fixture"
+    assert tools.infrastructure_data(make_optout())["compute-name"] == "posthog-optout"
+
+
+def test_ansible_stage_names_the_generated_key_in_keygen_mode():
+    # Remote Ansible must be able to use the generated key: nothing guarantees
+    # an agent holds it, so ansible.cfg names it under private_key_file.
+    data = tools.ansible_data(make_fixture(**{"ssh-keygen": True,
+                                              "ssh-private-key-path": "/home/x/.ssh/posthog-fixture"}))
+    assert data["ssh-keygen"] is True
+    assert data["ssh-private-key-path"] == "/home/x/.ssh/posthog-fixture"
+    assert tools.ansible_data(make_optout())["ssh-keygen"] is False
+
+
+async def test_acceptance_ssh_selects_the_generated_key(monkeypatch):
+    # Every ssh the acceptance step runs threads the identity arguments, so the
+    # check reaches the host with the deployment's own key in keygen mode and
+    # with the operator's arrangements in opt-out mode.
+    seen = {}
+
+    async def record(cmd, cwd=None, env=None, timeout_ms=None):
+        seen["cmd"] = cmd
+        return ExecResult(exit=0, out="ok\n", err="")
+    monkeypatch.setattr(runtime, "exec", record)
+    assert await tools.ssh_out({"ip": "203.0.113.7", "ssh-keygen": True,
+                                "ssh-private-key-path": "/home/x/.ssh/posthog-fixture"},
+                               "true", 1000) == "ok"
+    assert seen["cmd"][5:9] == ["-o", "IdentitiesOnly=yes", "-i", "/home/x/.ssh/posthog-fixture"]
+    assert seen["cmd"][9] == "root@203.0.113.7"
+    await tools.ssh_out({"ip": "203.0.113.7"}, "true", 1000)
+    assert seen["cmd"][5] == "root@203.0.113.7"
 
 
 def test_dns_is_apex_and_proxied():

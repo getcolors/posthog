@@ -37,7 +37,7 @@ import { homedir } from "node:os";
 // and break the development symlink at red/red.
 const PINS = {
   "package-posthog-red": "github:getcolors/posthog#e49f772f6660c36a63ef2cd2735202b406a3c8df",
-  "package-once-red": "github:getcolors/once#98d3cfa2c743b89a72bac0252c258f9edeedcad7",
+  "package-once-red": "github:getcolors/once#759eb0311b4bdf881eab813cfe5d00f76b9310cc",
   "red": "github:getcolors/red#db9bfe61282e2093f4098bf5a6ee0cd10added6e",
 };
 

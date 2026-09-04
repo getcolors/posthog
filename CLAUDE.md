@@ -24,6 +24,62 @@ systemd timer running `/usr/local/sbin/posthog-backup`, taking a Postgres
 `pg_dump` and a native ClickHouse `BACKUP` — never a hot `tar`, which races the
 server's merges — uploaded to Cloudflare R2.
 
+## The SSH keypair
+
+This package conforms to the workspace SSH Keypair Standard
+(`../workspace/standards/ssh-keypair.md`). Read that document before touching
+`green/src/clj/io/github/getcolors/posthog/ssh.clj` or its red/blue
+counterparts.
+
+The behaviour is ONCE's — `io.github.getcolors.once.ssh` — deliberately reused
+rather than reimplemented, so one standard has one implementation. Absent
+`digitalocean-ssh-keys` in desired state means keygen mode: the package
+generates `~/.ssh/<profile>`, declares the `digitalocean_ssh_key` resource
+named after the profile and references it by attribute, runs the DigitalOcean
+REST preflight before applying, names the key explicitly for Ansible
+(`private_key_file`) and for every acceptance `ssh`, and removes the local key
+last, only after the compute destroy succeeded. Present `digitalocean-ssh-keys`
+means opt-out: the package touches no key material and renders the historical
+shape byte for byte.
+
+What this repository adds is the build placeholder. ONCE derives key paths from
+`$HOME` and commits no rendered output; posthog commits goldens, so `build` and
+`--dry-run` render `/home/build-placeholder/.ssh/<profile>` instead. That is
+why `ssh/rendered-only?` tests `:green/dry-run` as well as the event — a
+dry-run that fell through to the real path would read `~/.ssh`, which the
+standard forbids, and `bb test` covers exactly that.
+
+The lifecycle integration is `start-step`'s `after-validate`, not the helper
+modules: build and dry-run fill the placeholder; a real create runs
+`ensure-key!` against a best-effort state read, then the provider preflight,
+then the `~/.ssh/config` checks; a real delete fills the real paths and adopts
+the instance address through the fail-closed `adopt-state` (an unreadable
+backend exits 1, an explicit `COLORS_PAR_IP` skips the read). The create
+matrix itself (leftover key, foreign key, interrupted create) is ONCE's and is
+tested there; this package tests the delegation.
+
+`bb golden` renders two fixtures because the standard has two modes: keygen
+(`test/fixtures/colors.yml`) and opt-out (`test/fixtures/optout.yml`). A change
+that only holds in one of them is not conforming.
+
+## The `~/.ssh/config` block and the compute name
+
+The `ansible-local` stage implements the workspace SSH Config Standard
+(`../workspace/standards/ssh-config.md`): one `blockinfile` task giving the
+operator `ssh <profile>`. The play is **this package's own copy** (standard
+§7), the opposite choice from `ssh.clj` above, because it writes into a file
+the operator shares with every host they reach. Address, user, alias and
+`block_state` arrive as **Ansible extra-vars, never through Selmer**, which is
+what keeps `build` byte-identical across workstations; `scripts/golden.sh`
+fails if a dotted quad ever appears under `posthog-ansible-local`. Create
+writes the block after compute and before convergence; delete removes it
+*before* the destroy, the reverse of the keypair.
+
+`digitalocean-name` is optional per the Compute Name Standard
+(`../workspace/standards/compute-name.md`): `validate/compute-name` resolves
+the profile or the override once, and the template interpolates
+`<{ compute-name }>` for the droplet and its firewall.
+
 ## Layout and commands
 
 The three implementations live in the tri-colour layout, matching `netbird` and
@@ -31,9 +87,9 @@ The three implementations live in the tri-colour layout, matching `netbird` and
 `green/src/`, `green/tasks/`, tests under `green/test/clj`), TypeScript/Bun in
 `red/`, and Python/uv in `blue/`. Green is canonical: a behavioural change lands
 in all three colours in the same commit and passes `scripts/parity.sh`, which
-renders the fixture through every colour and diffs the trees — and the colour
+renders both fixtures through every colour and diffs the trees — and the colour
 template trees (`red/resources`, blue's embedded `resources/`) — byte for byte.
-The fixture and the goldens are shared across colours at the repository root —
+The fixtures and the goldens are shared across colours at the repository root —
 `test/fixtures/` and `test/resources/golden/` — with `green/test/fixtures` and
 `green/test/resources` symlinks pointing at them. Each colour dir holds a
 launcher symlink to its skill payload (`green/green`, `red/red`, `blue/blue`).
@@ -44,7 +100,7 @@ cd green && bb golden
 cd green && bb golden:accept   # regenerate after an intended change — read the diff first
 cd red && bun test && bun run typecheck
 cd blue && uv run pytest
-./scripts/parity.sh            # three colours, byte for byte
+./scripts/parity.sh            # three colours, two fixtures, byte for byte
 ./scripts/launcher.sh          # from the repository root
 cd green && ./green build
 cd green && ./green create --dry-run
@@ -53,7 +109,8 @@ cd green && ./green delete     # guarded and destructive
 ```
 
 Never read or edit `.colors/`, read `.envrc.private`, export `COLORS_PAR_PROFILE`,
-or weaken `compute-prevent-destroy`. Build and dry-run are credential-free.
+or weaken `compute-prevent-destroy`. Build and dry-run are credential-free and
+must not touch `~/.ssh`.
 
 ## Invariants
 
@@ -81,12 +138,16 @@ first provider call rather than falling back to a published value.
 The package pins Green and ONCE in `green/deps.edn`, the Red SDK and
 `package-once-red` in `red/package.json`, and the Blue SDK and
 `package-once-blue` in `blue/pyproject.toml`. All three colours pin ONCE at the
-**same rev** (`98d3cfa`) — ONCE's own parity is what guarantees its colours
-agree per commit. ONCE supplies only the state-backend provider registry here
-(backend secrets and `tofu-env`); the pin is deliberately frozen, and a bump is
-its own change. `blue/pyproject.toml` carries a `[tool.uv] override-dependencies`
-block because `package-once-blue@98d3cfa` pins an older Blue rev (`369c5aa`);
-the override makes this package's Blue pin win.
+**same rev** (`759eb03`) — ONCE's own parity is what guarantees its colours
+agree per commit. ONCE supplies the state-backend provider registry (backend
+secrets and `tofu-env`) and the whole SSH Keypair Standard implementation, so
+the pin can never go below `bc06f2f`, the commit that moved the machine keypair
+into the operator's `~/.ssh`; a bump is its own change. The same ONCE rev is
+also written by hand into the red launcher's `PINS` and the blue launcher's
+PEP 723 header (through `green/tasks/pin.clj`), because a copied payload
+resolves ONCE from there, not from these manifests. `blue/pyproject.toml`
+carries a `[tool.uv] override-dependencies` block because `package-once-blue`
+pins an older Blue rev; the override makes this package's Blue pin win.
 
 Deployment launchers are copies of the skill payloads. Develop with
 `POSTHOG_LIB_ROOT` (the repository root, for every colour; red also accepts the

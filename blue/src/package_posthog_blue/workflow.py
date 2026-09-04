@@ -6,9 +6,9 @@ from __future__ import annotations
 from blue import dry_run, progress, tofu
 from blue.cli import par_name, read_pars
 from blue.lifecycle import preflight
-from blue.workflow import advice_add, workflow
+from blue.workflow import advice_add, failed, workflow
 
-from . import tools, validate
+from . import ssh, ssh_config, tools, validate
 
 DEFAULTS = {"provider-compute": "digitalocean", "provider-dns": "cloudflare",
             "provider-backend": "local", "compute-prevent-destroy": True,
@@ -46,6 +46,46 @@ async def adopt_state(opts: dict) -> dict:
                              " to address the instance directly")}
 
 
+async def best_effort_state(opts: dict) -> dict | None:
+    """`state_output` for the keypair's create matrix, which keys on a
+    best-effort read: an unreadable state (a fresh clone, a missing backend)
+    counts as absent on a create. The fail-closed reading above is the delete
+    path's alone."""
+    try:
+        return await state_output(opts)
+    except Exception:
+        return None
+
+
+async def after_validate(opts: dict, context: dict) -> dict:
+    """The lifecycle transition table, once the validators have passed.
+
+    build and dry-run only render: `with_machine_key` fills the placeholder
+    key paths and nothing under `~/.ssh` or `~/.ssh/config` is read. A real
+    create runs the keypair's create matrix and the DigitalOcean preflight
+    before any template is rendered — an unowned key on disk or at the
+    provider stops the run while stopping is still free — then the
+    `~/.ssh/config` ownership and placement checks. A real delete fills the
+    same template values (a destroy renders before it destroys) and adopts the
+    instance address from state, fail-closed; it checks no key, because its
+    cleanup runs after the destroy."""
+    real, event = context.get("real"), context.get("event")
+    if real and event == "delete":
+        return await adopt_state(ssh.with_machine_key(opts))
+    if real and event == "create":
+        opts = await ssh.ensure_key(opts, best_effort_state)
+        if failed(opts):
+            return opts
+        opts = ssh.preflight(ssh.with_machine_key(opts))
+        if failed(opts):
+            return opts
+        opts = ssh_config.preflight(opts)
+        if failed(opts):
+            return opts
+        return {**opts, "blue/exit": 0}
+    return {**ssh.with_machine_key(opts), "blue/exit": 0}
+
+
 async def start_step(opts: dict, env: dict | None = None) -> dict:
     return await preflight(
         opts, defaults=DEFAULTS, overlay=read_pars, env=env,
@@ -59,9 +99,7 @@ async def start_step(opts: dict, env: dict | None = None) -> dict:
                               if c["real"] and c["event"] == "delete"
                               and o.get("compute-prevent-destroy") else []),
         ],
-        after_validate=lambda o, _e, c: (adopt_state(o)
-                                         if c["real"] and c["event"] == "delete"
-                                         else {**o, "blue/exit": 0}))
+        after_validate=lambda o, _e, c: after_validate(o, c))
 
 
 def wire_fn(step: str, run_opts: dict):
@@ -69,12 +107,22 @@ def wire_fn(step: str, run_opts: dict):
         return {
             "posthog/start": (start_step, "posthog/ansible"),
             "posthog/ansible": (tools.ansible_step, "posthog/dns"),
-            "posthog/dns": (tools.dns_step, "posthog/infrastructure"),
-            "posthog/infrastructure": (tools.infrastructure_step,),
+            # The `~/.ssh/config` block goes before the destroy, the opposite
+            # of the keypair below. A block that outlives its host is stale but
+            # harmless; a key that predeceases its host locks the operator out
+            # of a machine that still exists. Both orders are deliberate; see
+            # standards/ssh-config.md.
+            "posthog/dns": (tools.dns_step, "posthog/ssh-config"),
+            "posthog/ssh-config": (tools.ansible_local_step, "posthog/infrastructure"),
+            "posthog/infrastructure": (tools.infrastructure_step, "posthog/ssh-cleanup"),
+            "posthog/ssh-cleanup": (ssh.cleanup_step,),
         }.get(step)
     return {
         "posthog/start": (start_step, "posthog/infrastructure"),
-        "posthog/infrastructure": (tools.infrastructure_step, "posthog/dns"),
+        # After compute, which is where the address first exists, and before
+        # the stage that converges the machine.
+        "posthog/infrastructure": (tools.infrastructure_step, "posthog/ssh-config"),
+        "posthog/ssh-config": (tools.ansible_local_step, "posthog/dns"),
         "posthog/dns": (tools.dns_step, "posthog/ansible"),
         "posthog/ansible": (tools.ansible_step, "posthog/acceptance"),
         "posthog/acceptance": (tools.acceptance_step,),
@@ -87,8 +135,8 @@ def backend_advice(tool: str):
         key=lambda o, tool=tool: f"{o.get('profile')}/{tool}.tfstate")
 
 
-side_effecting = ["posthog/infrastructure", "posthog/dns", "posthog/ansible",
-                  "posthog/acceptance"]
+side_effecting = ["posthog/infrastructure", "posthog/dns", "posthog/ssh-config",
+                  "posthog/ansible", "posthog/acceptance", "posthog/ssh-cleanup"]
 
 
 def create_workflow():

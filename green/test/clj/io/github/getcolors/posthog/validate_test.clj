@@ -5,13 +5,45 @@
             [io.github.getcolors.posthog.validate :as validate]))
 
 (def fixture-file "test/fixtures/colors.yml")
+(def optout-file "test/fixtures/optout.yml")
 
-(defn fixture [& {:as overrides}]
-  (merge (green-cli/read-state fixture-file
-                               (str/replace (slurp fixture-file) "WORKDIR" ".colors")) overrides))
+(defn- read-fixture [path overrides]
+  (merge (green-cli/read-state path (str/replace (slurp path) "WORKDIR" ".colors"))
+         overrides))
+(defn fixture [& {:as overrides}] (read-fixture fixture-file overrides))
+(defn optout [& {:as overrides}] (read-fixture optout-file overrides))
 
 (deftest fixture-is-valid
   (is (= [] (validate/state-errors (fixture)))))
+
+(deftest optout-fixture-is-valid
+  (is (= [] (validate/state-errors (optout)))))
+
+(deftest machine-key-is-not-required
+  ;; The standard makes absence meaningful: requiring digitalocean-ssh-keys
+  ;; would make every conforming keygen deployment invalid.
+  (is (not-any? #(str/includes? % "digitalocean-ssh-keys")
+                (validate/state-errors (fixture)))))
+
+(deftest absent-machine-key-selects-keygen
+  (is (true? (validate/keygen? (fixture))))
+  (is (false? (validate/keygen? (optout)))))
+
+;; Compute Name Standard: the profile is the default, the name key an override.
+
+(deftest compute-name-defaults-to-the-profile
+  (is (= "posthog-fixture" (validate/compute-name (fixture))))
+  (is (= "posthog-fixture" (validate/compute-name (fixture :digitalocean-name ""))))
+  (is (= "posthog-fixture" (validate/compute-name (fixture :digitalocean-name "REPLACE_ME"))))
+  (is (= "posthog-optout" (validate/compute-name (optout)))))
+
+(deftest compute-name-honours-the-override
+  (is (= "analytics-1" (validate/compute-name (fixture :digitalocean-name " analytics-1 ")))))
+
+(deftest compute-name-is-not-required-but-is-validated
+  (is (not-any? #(str/includes? % "digitalocean-name") (validate/state-errors (fixture))))
+  (is (some #(str/includes? % "digitalocean-name")
+            (validate/state-errors (fixture :digitalocean-name "not valid!")))))
 
 (deftest reports-all-errors
   (let [errors (validate/state-errors

@@ -11,12 +11,18 @@ from __future__ import annotations
 import re
 
 from blue.cli import par_name
+from package_once_blue import ssh as once_ssh
 from package_once_blue.validate import providers
 
 __all__ = ["providers"]
 
 profile_par = par_name("profile")
 
+# Every key desired state must carry. Two DigitalOcean keys are deliberately
+# absent: `digitalocean-ssh-keys`, because per the SSH Keypair Standard its
+# *absence* selects keygen mode, and `digitalocean-name`, because per the
+# Compute Name Standard the profile is the default and the key is only an
+# override. Requiring either would make conforming deployments invalid.
 required = [
     "profile", "workdir", "provider-compute", "provider-dns", "provider-backend",
     "compute-prevent-destroy", "posthog-host", "posthog-admin-email", "posthog-image",
@@ -27,10 +33,14 @@ required = [
     "posthog-kafka-data-dir",
     "posthog-backup-dir", "posthog-backup-r2-bucket", "posthog-backup-r2-endpoint",
     "posthog-backup-r2-region", "posthog-backup-oncalendar", "posthog-backup-retention-days",
-    "digitalocean-name", "digitalocean-region", "digitalocean-size", "digitalocean-image",
-    "digitalocean-ssh-keys", "digitalocean-ssh-sources", "digitalocean-http-sources",
+    "digitalocean-region", "digitalocean-size", "digitalocean-image",
+    "digitalocean-ssh-sources", "digitalocean-http-sources",
     "r2-bucket", "r2-endpoint",
 ]
+
+# DigitalOcean droplet names: letters, digits, dots and hyphens, up to 63
+# characters, starting and ending alphanumeric.
+_digitalocean_name_re = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?")
 
 _host_re = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
 # name:tag, name@sha256:..., or name:tag@sha256:... A digest is the only
@@ -47,6 +57,28 @@ image_keys = [
 
 def missing(x) -> bool:
     return x is None or (isinstance(x, str) and not x.strip())
+
+
+def placeholder(value) -> bool:
+    """Absent, blank or REPLACE_ME all mean 'use the profile' (Compute Name
+    Standard §2: presence is the only switch)."""
+    return missing(value) or str(value).strip() == "REPLACE_ME"
+
+
+def compute_name(opts: dict) -> str:
+    """What this deployment calls its machine. The one function that answers it
+    — every label, including the firewall's, derives from this and never from
+    the raw override key or a second copy of the profile (§3)."""
+    override = opts.get("digitalocean-name")
+    if placeholder(override):
+        return str("" if opts.get("profile") is None else opts.get("profile"))
+    return str(override).strip()
+
+
+def keygen(opts: dict) -> bool:
+    """Whether this deployment owns its machine keypair. Delegates to ONCE, the
+    standard's reference implementation, so one rule decides it everywhere."""
+    return once_ssh.keygen(opts)
 
 
 def env_errors(env: dict) -> list[str]:
@@ -82,6 +114,9 @@ def state_errors(opts: dict) -> list[str]:
     for k in ["posthog-backup-retention-days"]:
         if not missing(opts.get(k)) and not _positive_int(opts.get(k)):
             errors.append(f":{k} must be a positive integer")
+    if not (placeholder(opts.get("digitalocean-name"))
+            or _digitalocean_name_re.fullmatch(compute_name(opts))):
+        errors.append(":digitalocean-name must be a valid DigitalOcean droplet name")
     if "digitalocean-vpc-uuid" in opts:
         errors.append(":digitalocean-vpc-uuid must be absent; "
                       "the default regional VPC is discovered at runtime")

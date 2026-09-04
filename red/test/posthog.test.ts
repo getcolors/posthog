@@ -1,22 +1,48 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { runtime } from "red/runtime";
 import type { Opts } from "red/workflow";
+import * as ssh from "../src/ssh.ts";
+import * as sshConfig from "../src/ssh-config.ts";
 import * as tools from "../src/tools.ts";
 import * as validate from "../src/validate.ts";
 import * as workflow from "../src/workflow.ts";
 
 const fixtureFile = resolve(import.meta.dir, "../../test/fixtures/colors.yml");
+const optoutFile = resolve(import.meta.dir, "../../test/fixtures/optout.yml");
 
-function fixture(overrides: Opts = {}): Opts {
-  const text = readFileSync(fixtureFile, "utf8").replaceAll("WORKDIR", ".colors");
+function readFixture(path: string, overrides: Opts): Opts {
+  const text = readFileSync(path, "utf8").replaceAll("WORKDIR", ".colors");
   return {
     ...(Bun.YAML.parse(text) as Opts),
-    "red/state-file": fixtureFile,
+    "red/state-file": path,
     ...overrides,
   };
+}
+
+const fixture = (overrides: Opts = {}) => readFixture(fixtureFile, overrides);
+const optout = (overrides: Opts = {}) => readFixture(optoutFile, overrides);
+
+// ~/.ssh redirection: ONCE's ssh module and this package's ssh-config both
+// read $HOME at call time, exactly so tests can point them at a fresh
+// temporary home.
+let savedHome: string | undefined;
+let home: string;
+beforeEach(() => {
+  savedHome = process.env.HOME;
+  home = mkdtempSync(join(tmpdir(), "posthog-red-test"));
+  process.env.HOME = home;
+});
+afterEach(() => {
+  process.env.HOME = savedHome;
+  rmSync(home, { recursive: true, force: true });
+});
+
+function write(path: string, content: string) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
 }
 
 const resources = resolve(import.meta.dir, "../resources/tools");
@@ -69,6 +95,37 @@ describe("tools", () => {
   test("infrastructure discovers default vpc", () => {
     const data = tools.infrastructureData(fixture());
     expect(tools.cidrs(data, "digitalocean-http-sources")).toEqual(["0.0.0.0/0", "::/0"]);
+  });
+
+  test("infrastructure data carries the ssh mode and the compute name", () => {
+    expect(tools.infrastructureData(fixture())["ssh-keygen"]).toBe(true);
+    expect(tools.infrastructureData(optout())["ssh-keygen"]).toBe(false);
+    expect(tools.infrastructureData(fixture())["compute-name"]).toBe("posthog-fixture");
+    expect(tools.infrastructureData(optout())["compute-name"]).toBe("posthog-optout");
+  });
+
+  test("the ansible stage names the generated key in keygen mode", () => {
+    // Remote Ansible must be able to use the generated key: nothing guarantees
+    // an agent holds it, so ansible.cfg names it under private_key_file.
+    const data = tools.ansibleData(fixture({ "ssh-keygen": true,
+      "ssh-private-key-path": "/home/x/.ssh/posthog-fixture" }));
+    expect(data["ssh-keygen"]).toBe(true);
+    expect(data["ssh-private-key-path"]).toBe("/home/x/.ssh/posthog-fixture");
+    expect(tools.ansibleData(optout())["ssh-keygen"]).toBe(false);
+  });
+
+  test("acceptance ssh selects the generated key", async () => {
+    // Every ssh the acceptance step runs threads the identity arguments, so
+    // the check reaches the host with the deployment's own key in keygen mode
+    // and with the operator's arrangements in opt-out mode.
+    let seen: string[] = [];
+    runtime.exec = async (cmd) => { seen = cmd; return { exit: 0, out: "ok\n", err: "" }; };
+    expect(await tools.sshOut({ ip: "203.0.113.7", "ssh-keygen": true,
+      "ssh-private-key-path": "/home/x/.ssh/posthog-fixture" }, "true", 1000)).toBe("ok");
+    expect(seen.slice(5, 9)).toEqual(["-o", "IdentitiesOnly=yes", "-i", "/home/x/.ssh/posthog-fixture"]);
+    expect(seen[9]).toBe("root@203.0.113.7");
+    await tools.sshOut({ ip: "203.0.113.7" }, "true", 1000);
+    expect(seen[5]).toBe("root@203.0.113.7");
   });
 
   test("dns is apex and proxied", () => {
@@ -463,6 +520,35 @@ describe("validate", () => {
     expect(validate.stateErrors(fixture())).toEqual([]);
   });
 
+  test("optout fixture is valid", () => {
+    expect(validate.stateErrors(optout())).toEqual([]);
+  });
+
+  test("the machine key is not required", () => {
+    // The standard makes absence meaningful: requiring digitalocean-ssh-keys
+    // would make every conforming keygen deployment invalid.
+    expect(validate.stateErrors(fixture()).some((e) => e.includes("digitalocean-ssh-keys"))).toBe(false);
+  });
+
+  test("absent machine key selects keygen", () => {
+    expect(validate.keygen(fixture())).toBe(true);
+    expect(validate.keygen(optout())).toBe(false);
+  });
+
+  test("compute name defaults to the profile and honours the override", () => {
+    expect(validate.computeName(fixture())).toBe("posthog-fixture");
+    expect(validate.computeName(fixture({ "digitalocean-name": "" }))).toBe("posthog-fixture");
+    expect(validate.computeName(fixture({ "digitalocean-name": "REPLACE_ME" }))).toBe("posthog-fixture");
+    expect(validate.computeName(optout())).toBe("posthog-optout");
+    expect(validate.computeName(fixture({ "digitalocean-name": " analytics-1 " }))).toBe("analytics-1");
+  });
+
+  test("compute name is not required but is validated", () => {
+    expect(validate.stateErrors(fixture()).some((e) => e.includes("digitalocean-name"))).toBe(false);
+    expect(validate.stateErrors(fixture({ "digitalocean-name": "not valid!" }))
+      .some((e) => e.includes("digitalocean-name"))).toBe(true);
+  });
+
   test("reports all errors", () => {
     const errors = validate.stateErrors(
       fixture({ "posthog-host": "bad", "posthog-image": "floating",
@@ -569,11 +655,358 @@ describe("workflow", () => {
   });
 
   test("graph orders private stack", () => {
-    expect((workflow.wireFn("posthog/start", { "red/event": "create" }) ?? []).slice(1))
-      .toEqual(["posthog/infrastructure"]);
-    expect((workflow.wireFn("posthog/infrastructure", { "red/event": "create" }) ?? []).slice(1))
-      .toEqual(["posthog/dns"]);
+    const next = (step: string) =>
+      (workflow.wireFn(step, { "red/event": "create" }) ?? []).slice(1);
+    expect(next("posthog/start")).toEqual(["posthog/infrastructure"]);
+    expect(next("posthog/infrastructure")).toEqual(["posthog/ssh-config"]);
+    expect(next("posthog/ssh-config")).toEqual(["posthog/dns"]);
+    expect(next("posthog/dns")).toEqual(["posthog/ansible"]);
+    expect(next("posthog/ansible")).toEqual(["posthog/acceptance"]);
     expect((workflow.wireFn("posthog/start", { "red/event": "delete" }) ?? []).slice(1))
       .toEqual(["posthog/ansible"]);
+  });
+
+  test("delete removes the config block before the destroy and the key after it", () => {
+    // The ordering is what makes "key present ⇔ deployment exists" hold: a
+    // failed destroy never reaches the cleanup step, and correctly leaves the
+    // key that is still the only credential to whatever survived.
+    const next = (step: string) =>
+      (workflow.wireFn(step, { "red/event": "delete" }) ?? []).slice(1);
+    expect(next("posthog/ansible")).toEqual(["posthog/dns"]);
+    expect(next("posthog/dns")).toEqual(["posthog/ssh-config"]);
+    expect(next("posthog/ssh-config")).toEqual(["posthog/infrastructure"]);
+    expect(next("posthog/infrastructure")).toEqual(["posthog/ssh-cleanup"]);
+    expect(next("posthog/ssh-cleanup")).toEqual([]);
+  });
+
+  test("build and dry-run never touch ~/.ssh", async () => {
+    // The standard forbids reading, creating, or requiring anything under
+    // ~/.ssh on a build or dry-run: they render from desired state alone.
+    // A poisoned config proves nothing in the build path reads it.
+    write(join(home, ".ssh", "config"), "ServerAliveInterval 60\nHost posthog-fixture\n");
+    runtime.exec = () => { throw new Error("ssh-keygen must not run"); };
+    for (const overrides of [{ "red/event": "build" },
+                             { "red/event": "create", "red/dry-run": true },
+                             { "red/event": "delete", "red/dry-run": true }]) {
+      const result = await workflow.startStep(fixture(overrides), {});
+      expect(result["red/exit"]).toBe(0);
+      expect(String(result["ssh-public-key-path"])).toStartWith("/home/build-placeholder");
+      expect(result["digitalocean-ssh-keys"]).toBe(result["ssh-public-key-path"]);
+    }
+  });
+
+  test("opt-out renders the historical shape on every rendered event", async () => {
+    for (const overrides of [{ "red/event": "build" },
+                             { "red/event": "create", "red/dry-run": true }]) {
+      const result = await workflow.startStep(optout(overrides), {});
+      expect(result["red/exit"]).toBe(0);
+      expect(result["digitalocean-ssh-keys"]).toBe("58495393");
+      expect(result["ssh-keygen"]).toBeUndefined();
+    }
+  });
+
+  test("a real delete fills the real key paths and adopts state", async () => {
+    // The transition table's last row: a destroy renders before it destroys,
+    // so the template values are the real ones, merged with the adopted state.
+    runtime.exec = async () => ({ exit: 0, out: JSON.stringify({
+      params: { value: { ip: "203.0.113.9", ssh_key_id: "77" } } }), err: "" });
+    const r = await workflow.startStep(deletableFixture({ "red/event": "delete" }), {});
+    expect(r["red/exit"]).toBe(0);
+    expect(r.ip).toBe("203.0.113.9");
+    expect(r["ssh-private-key-path"]).toBe(join(home, ".ssh", "posthog-fixture"));
+    expect(r["ssh-keygen"]).toBe(true);
+  });
+
+  test("a real create runs the key matrix then both preflights", async () => {
+    // Row three of the transition table, in order: ensureKey against the
+    // best-effort state read, the provider preflight, then the ~/.ssh/config
+    // checks. Each stops the run on its own error.
+    const creatable = (overrides: Opts = {}) =>
+      deletableFixture({ "compute-prevent-destroy": true, ...overrides });
+    const context = { event: "create", real: true };
+    const calls: unknown[] = [];
+    const ensure = spyOn(ssh, "ensureKey").mockImplementation(async (opts, stateFn) => {
+      calls.push(["ensure", await stateFn(opts)]);
+      return opts;
+    });
+    const preflight = spyOn(ssh, "preflight").mockImplementation(async (opts) => {
+      calls.push("preflight");
+      return opts;
+    });
+    const config = spyOn(sshConfig, "preflight").mockImplementation((opts) => {
+      calls.push("ssh-config");
+      return opts;
+    });
+    try {
+      // All pass; an unreadable backend counts as no state on a create.
+      runtime.exec = async () => ({ exit: 1, out: "", err: "Unauthorized" });
+      let r = await workflow.afterValidate(creatable({ "red/event": "create" }), context);
+      expect(r["red/exit"]).toBe(0);
+      expect(calls).toEqual([["ensure", undefined], "preflight", "ssh-config"]);
+      expect(r["ssh-keygen"]).toBe(true);
+      // The key matrix stops the run.
+      ensure.mockImplementation(async (opts) => ({ ...opts, "red/exit": 1, "red/err": "half a keypair" }));
+      preflight.mockImplementation(async () => { throw new Error("must not run"); });
+      r = await workflow.afterValidate(creatable({ "red/event": "create" }), context);
+      expect(r["red/exit"]).toBe(1);
+      expect(String(r["red/err"])).toContain("half a keypair");
+      // The provider preflight stops the run.
+      ensure.mockImplementation(async (opts) => opts);
+      preflight.mockImplementation(async (opts) => ({ ...opts, "red/exit": 1, "red/err": "already has an SSH key" }));
+      config.mockImplementation(() => { throw new Error("must not run"); });
+      r = await workflow.afterValidate(creatable({ "red/event": "create" }), context);
+      expect(r["red/exit"]).toBe(1);
+      expect(String(r["red/err"])).toContain("already has an SSH key");
+      // The ~/.ssh/config checks stop the run.
+      preflight.mockImplementation(async (opts) => opts);
+      config.mockImplementation((opts) => ({ ...opts, "red/exit": 1, "red/err": "refusing to manage" }));
+      r = await workflow.afterValidate(creatable({ "red/event": "create" }), context);
+      expect(r["red/exit"]).toBe(1);
+      expect(String(r["red/err"])).toContain("refusing to manage");
+    } finally {
+      ensure.mockRestore();
+      preflight.mockRestore();
+      config.mockRestore();
+    }
+  });
+
+  test("opt-out create skips the key matrix", async () => {
+    // Presence of the explicit key is the only switch: the package then
+    // generates, validates and deletes nothing.
+    runtime.exec = () => { throw new Error("ssh-keygen must not run"); };
+    const r = await workflow.afterValidate(
+      { ...deletableFixture({ "compute-prevent-destroy": true }), ...optout({ "red/event": "create" }) },
+      { event: "create", real: true });
+    expect(r["red/exit"]).toBe(0);
+    expect(r["digitalocean-ssh-keys"]).toBe("58495393");
+    expect(existsSync(join(home, ".ssh"))).toBe(false);
+  });
+});
+
+// --- ssh keypair (SSH Keypair Standard) --------------------------------------
+
+describe("ssh", () => {
+  test("build renders a stable placeholder path", () => {
+    const opts = ssh.withMachineKey(fixture({ "red/event": "build" }));
+    expect(String(opts["ssh-public-key-path"])).toStartWith(ssh.buildPlaceholderDir);
+    expect(opts["digitalocean-ssh-keys"]).toBe(opts["ssh-public-key-path"]);
+    expect(String(opts["ssh-private-key-path"])).not.toContain(home);
+  });
+
+  test("a dry-run renders the placeholder too", () => {
+    const opts = ssh.withMachineKey(fixture({ "red/event": "create", "red/dry-run": true }));
+    expect(String(opts["ssh-public-key-path"])).toStartWith(ssh.buildPlaceholderDir);
+  });
+
+  test("real events render the real path", () => {
+    const opts = ssh.withMachineKey(fixture({ "red/event": "create" }));
+    expect(opts["ssh-private-key-path"]).toBe(join(home, ".ssh", "posthog-fixture"));
+    expect(opts["ssh-public-key-path"]).toBe(join(home, ".ssh", "posthog-fixture.pub"));
+  });
+
+  test("opt-out passes through untouched", () => {
+    for (const event of ["build", "create", "delete"]) {
+      const opts = ssh.withMachineKey(optout({ "red/event": event }));
+      expect(opts["digitalocean-ssh-keys"]).toBe("58495393");
+      expect(opts["ssh-public-key-path"]).toBeUndefined();
+      expect(opts["ssh-keygen"]).toBeUndefined();
+    }
+  });
+
+  test("first create generates the keypair", async () => {
+    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }), async () => undefined);
+    const prv = join(home, ".ssh", "posthog-fixture");
+    const pub = `${prv}.pub`;
+    expect(opts["red/err"]).toBeUndefined();
+    expect(existsSync(prv)).toBe(true);
+    expect(existsSync(pub)).toBe(true);
+    // ed25519, no passphrase, profile-named comment
+    expect(readFileSync(pub, "utf8")).toContain("ssh-ed25519");
+    expect(readFileSync(pub, "utf8")).toContain("posthog-fixture managed by Colors");
+    // 600 on the private key, 700 on ~/.ssh
+    expect(statSync(prv).mode & 0o777).toBe(0o600);
+    expect(statSync(join(home, ".ssh")).mode & 0o777).toBe(0o700);
+  });
+
+  test("converge reuses an existing key", async () => {
+    write(join(home, ".ssh", "posthog-fixture"), "private");
+    write(join(home, ".ssh", "posthog-fixture.pub"), "ssh-ed25519 AAAA test");
+    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }),
+      async () => ({ ip: "192.0.2.10" }));
+    expect(opts["red/err"]).toBeUndefined();
+    expect(readFileSync(join(home, ".ssh", "posthog-fixture"), "utf8")).toBe("private");
+  });
+
+  test("state without a key is an error", async () => {
+    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }),
+      async () => ({ ip: "192.0.2.10" }));
+    expect(opts["red/exit"]).toBe(1);
+    expect(String(opts["red/err"])).toContain("does not hold the machine key");
+    expect(String(opts["red/err"])).toContain("rebuild");
+  });
+
+  test("a key without state is never overwritten", async () => {
+    const prv = join(home, ".ssh", "posthog-fixture");
+    write(prv, "irreplaceable");
+    write(`${prv}.pub`, "ssh-ed25519 AAAA test");
+    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }), async () => undefined);
+    expect(opts["red/exit"]).toBe(1);
+    expect(String(opts["red/err"])).toContain("no compute state is readable");
+    expect(String(opts["red/err"])).toContain("survives");
+    expect(readFileSync(prv, "utf8")).toBe("irreplaceable");
+  });
+
+  test("half a keypair is an error", async () => {
+    write(join(home, ".ssh", "posthog-fixture"), "private");
+    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }), async () => undefined);
+    expect(opts["red/exit"]).toBe(1);
+    expect(String(opts["red/err"])).toContain("half a keypair");
+  });
+
+  test("opt-out generates nothing", async () => {
+    const opts = await ssh.ensureKey(optout({ "red/event": "create" }), async () => undefined);
+    expect(opts["red/err"]).toBeUndefined();
+    expect(existsSync(join(home, ".ssh"))).toBe(false);
+  });
+
+  test("preflight passes when no account key matches, or when it is ours", async () => {
+    const clean = await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create" })),
+      async () => [{ id: "1", name: "someone-else", public: "ssh-ed25519 BBBB" }]);
+    expect(clean["red/err"]).toBeUndefined();
+    const owned = await ssh.preflight(
+      ssh.withMachineKey(fixture({ "red/event": "create",
+        "once/ssh-state-params": { ssh_key_id: "abc" } })),
+      async () => [{ id: "abc", name: "posthog-fixture", public: "ssh-ed25519 AAAA" }]);
+    expect(owned["red/err"]).toBeUndefined();
+  });
+
+  test("preflight refuses our leftover key", async () => {
+    write(join(home, ".ssh", "posthog-fixture.pub"), "ssh-ed25519 AAAA comment");
+    const opts = await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create" })),
+      async () => [{ id: "abc", name: "posthog-fixture", public: "ssh-ed25519 AAAA" }]);
+    expect(opts["red/exit"]).toBe(1);
+    expect(String(opts["red/err"])).toContain("previous delete");
+    expect(String(opts["red/err"])).toContain("delete that key");
+  });
+
+  test("preflight refuses a foreign key and says do not delete it", async () => {
+    write(join(home, ".ssh", "posthog-fixture.pub"), "ssh-ed25519 OURS comment");
+    const opts = await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create" })),
+      async () => [{ id: "abc", name: "posthog-fixture", public: "ssh-ed25519 THEIRS" }]);
+    expect(opts["red/exit"]).toBe(1);
+    expect(String(opts["red/err"])).toContain("Do not delete it");
+  });
+
+  test("preflight failure is an error, not a skip", async () => {
+    const opts = await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create" })),
+      async () => { throw new Error("HTTP 500"); });
+    expect(opts["red/exit"]).toBe(1);
+    expect(String(opts["red/err"])).toContain("cannot list");
+  });
+
+  test("delete removes the keypair; ~/.ssh itself survives", () => {
+    write(join(home, ".ssh", "posthog-fixture"), "private");
+    write(join(home, ".ssh", "posthog-fixture.pub"), "public");
+    ssh.cleanupStep(fixture({ "red/event": "delete", "ssh-keygen": true }));
+    expect(existsSync(join(home, ".ssh", "posthog-fixture"))).toBe(false);
+    expect(existsSync(join(home, ".ssh", "posthog-fixture.pub"))).toBe(false);
+    expect(existsSync(join(home, ".ssh"))).toBe(true);
+  });
+
+  test("cleanup is inert on create and in opt-out mode", () => {
+    write(join(home, ".ssh", "posthog-fixture"), "private");
+    ssh.cleanupStep(fixture({ "red/event": "create", "ssh-keygen": true }));
+    expect(existsSync(join(home, ".ssh", "posthog-fixture"))).toBe(true);
+    ssh.cleanupStep(optout({ "red/event": "delete" }));
+    expect(existsSync(join(home, ".ssh", "posthog-fixture"))).toBe(true);
+  });
+});
+
+// --- ~/.ssh/config (SSH Config Standard) -------------------------------------
+
+describe("ssh-config", () => {
+  test("the alias is the profile and the identity file keeps the tilde", () => {
+    expect(sshConfig.hostAlias(fixture())).toBe("posthog-fixture");
+    expect(sshConfig.identityFile(fixture())).toBe("~/.ssh/posthog-fixture");
+    expect(sshConfig.identityFile(fixture())).not.toContain(home);
+  });
+
+  test("the marker is the alias alone", () => {
+    expect(sshConfig.beginMarker("posthog-digitalocean")).toBe("# BEGIN posthog-digitalocean ANSIBLE MANAGED BLOCK");
+    expect(sshConfig.endMarker("posthog-digitalocean")).toBe("# END posthog-digitalocean ANSIBLE MANAGED BLOCK");
+  });
+
+  test("a foreign stanza is found; our own block is not foreign", () => {
+    expect(sshConfig.foreignStanzaLine(
+      ["Host other", "    HostName 192.0.2.1", "", "Host posthog-fixture"],
+      "posthog-fixture")).toBe(4);
+    const alias = "posthog-fixture";
+    expect(sshConfig.foreignStanzaLine(
+      [sshConfig.beginMarker(alias), `Host ${alias}`, "    HostName 192.0.2.1",
+       sshConfig.endMarker(alias)], alias)).toBeUndefined();
+  });
+
+  test("a stanza after our block is still foreign", () => {
+    const alias = "posthog-fixture";
+    expect(sshConfig.foreignStanzaLine(
+      [sshConfig.beginMarker(alias), `Host ${alias}`, sshConfig.endMarker(alias),
+       `Host ${alias}`], alias)).toBe(4);
+  });
+
+  test("a block under a retired marker is foreign", () => {
+    const alias = "posthog-digitalocean";
+    expect(sshConfig.foreignStanzaLine(
+      [`# BEGIN posthog ${alias} ANSIBLE MANAGED BLOCK`, `Host ${alias}`,
+       `# END posthog ${alias} ANSIBLE MANAGED BLOCK`], alias)).toBe(2);
+  });
+
+  test("multi-pattern host lines count; unrelated files are left alone", () => {
+    expect(sshConfig.foreignStanzaLine(["Host web posthog-fixture db"], "posthog-fixture")).toBe(1);
+    expect(sshConfig.foreignStanzaLine(["Host build", "Host posthog-other"], "posthog-fixture"))
+      .toBeUndefined();
+  });
+
+  test("an option above the first Host is refused; comments and Host openers are fine", () => {
+    expect(sshConfig.leadingOptionLine(["ServerAliveInterval 60", "Host a"])).toBe(1);
+    expect(sshConfig.leadingOptionLine(["# comment", "", "IdentitiesOnly yes", "Host a"])).toBe(3);
+    expect(sshConfig.leadingOptionLine(["Host a", "    User root"])).toBeUndefined();
+    expect(sshConfig.leadingOptionLine(["# lead comment", "", "Host a", "    User root"])).toBeUndefined();
+    expect(sshConfig.leadingOptionLine(["Match host b", "    User root"])).toBeUndefined();
+    expect(sshConfig.leadingOptionLine(["# nothing here", ""])).toBeUndefined();
+  });
+
+  test("preflight refuses rather than overwrites", () => {
+    const refused = sshConfig.preflight(fixture(), {
+      adoptError: () => "already declares `Host x`",
+      placementError: () => undefined,
+    });
+    expect(refused["red/exit"]).toBe(1);
+    expect(String(refused["red/err"])).toContain("already declares");
+    const clean = sshConfig.preflight(fixture(), {
+      adoptError: () => undefined,
+      placementError: () => undefined,
+    });
+    expect(clean["red/exit"]).toBeUndefined();
+  });
+
+  test("adopt and placement errors read the real file and mention the recovery", () => {
+    write(join(home, ".ssh", "config"), "ServerAliveInterval 60\nHost posthog-fixture\n");
+    expect(String(sshConfig.adoptError(fixture()))).toContain("Host posthog-fixture");
+    expect(String(sshConfig.placementError(fixture()))).toContain("Host *");
+  });
+
+  test("the local play renders no address and follows keygen mode", () => {
+    const data = tools.ansibleLocalData(fixture({ ip: "203.0.113.7" }));
+    expect(data["ssh-config-identity-file"]).toBe("~/.ssh/posthog-fixture");
+    expect(data["ssh-keygen"]).toBe(true);
+    expect(tools.ansibleLocalData(optout())["ssh-keygen"]).toBe(false);
+  });
+
+  test("the local stage renders three files", () => {
+    const targets = tools.ansibleLocalSpecs(fixture()).map((s) => String(s.target));
+    for (const file of ["/ansible.cfg", "/inventory.ini", "/main.yml"]) {
+      expect(targets.some((t) => t.endsWith(file))).toBe(true);
+    }
+    expect(targets.every((t) => t.includes("posthog-ansible-local"))).toBe(true);
   });
 });

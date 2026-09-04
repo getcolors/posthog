@@ -11,18 +11,41 @@ data "digitalocean_vpc" "default" {
   name = "default-<{ digitalocean-region }>"
 }
 
-resource "digitalocean_droplet" "posthog" {
-  name     = "<{ digitalocean-name }>"
+<% if ssh-keygen %># The machine keypair this deployment generated and owns (SSH Keypair
+# Standard): the account resource is named after the profile and lives in this
+# stack's state, which is what makes its ownership decidable. Never reference a
+# literal key id here in keygen mode.
+resource "digitalocean_ssh_key" "machine" {
+  name       = "<{ profile }>"
+  public_key = trimspace(file("<{ ssh-public-key-path }>"))
+}
+
+<% endif %>resource "digitalocean_droplet" "posthog" {
+  name     = "<{ compute-name }>"
   region   = "<{ digitalocean-region }>"
   size     = "<{ digitalocean-size }>"
   image    = "<{ digitalocean-image }>"
   vpc_uuid = data.digitalocean_vpc.default.id
-  ssh_keys = ["<{ digitalocean-ssh-keys }>"]
-  lifecycle { prevent_destroy = <{ compute-prevent-destroy }> }
+<% if ssh-keygen %>  # SSH keys are ids already in the account, and ForceNew: changing the key set
+  # destroys and recreates the droplet instead of re-authorizing it. Rotation
+  # is a rebuild, never an edit on a machine whose disk you intend to keep.
+  ssh_keys = [digitalocean_ssh_key.machine.id]
+  # Wait for ssh before starting Ansible.
+  connection {
+    type        = "ssh"
+    user        = "root"
+    host        = self.ipv4_address
+    private_key = file("<{ ssh-private-key-path }>")
+  }
+  provisioner "remote-exec" {
+    inline = ["ls"]
+  }
+<% else %>  ssh_keys = ["<{ digitalocean-ssh-keys }>"]
+<% endif %>  lifecycle { prevent_destroy = <{ compute-prevent-destroy }> }
 }
 
 resource "digitalocean_firewall" "posthog" {
-  name        = "<{ digitalocean-name }>-firewall"
+  name        = "<{ compute-name }>-firewall"
   droplet_ids = [digitalocean_droplet.posthog.id]
   inbound_rule {
     protocol         = "tcp"
@@ -57,5 +80,12 @@ resource "digitalocean_firewall" "posthog" {
 }
 
 output "params" {
-  value = { ip = digitalocean_droplet.posthog.ipv4_address, user = "root", sudoer = "root", name = "<{ profile }>" }
-}
+<% if ssh-keygen %>  value = {
+    ip         = digitalocean_droplet.posthog.ipv4_address
+    user       = "root"
+    sudoer     = "root"
+    name       = "<{ profile }>"
+    ssh_key_id = digitalocean_ssh_key.machine.id
+  }
+<% else %>  value = { ip = digitalocean_droplet.posthog.ipv4_address, user = "root", sudoer = "root", name = "<{ profile }>" }
+<% endif %>}

@@ -8,11 +8,17 @@
 import { parName } from "red/cli";
 import type { Opts } from "red/workflow";
 import { providers } from "package-once-red";
+import { onceSsh } from "./once.ts";
 
 export { providers };
 
 export const profilePar = parName("profile");
 
+// Every key desired state must carry. Two DigitalOcean keys are deliberately
+// absent: `digitalocean-ssh-keys`, because per the SSH Keypair Standard its
+// *absence* selects keygen mode, and `digitalocean-name`, because per the
+// Compute Name Standard the profile is the default and the key is only an
+// override. Requiring either would make conforming deployments invalid.
 export const required = [
   "profile", "workdir", "provider-compute", "provider-dns", "provider-backend",
   "compute-prevent-destroy", "posthog-host", "posthog-admin-email", "posthog-image",
@@ -22,10 +28,14 @@ export const required = [
   "posthog-kafka-data-dir",
   "posthog-backup-dir", "posthog-backup-r2-bucket", "posthog-backup-r2-endpoint",
   "posthog-backup-r2-region", "posthog-backup-oncalendar", "posthog-backup-retention-days",
-  "digitalocean-name", "digitalocean-region", "digitalocean-size", "digitalocean-image",
-  "digitalocean-ssh-keys", "digitalocean-ssh-sources", "digitalocean-http-sources",
+  "digitalocean-region", "digitalocean-size", "digitalocean-image",
+  "digitalocean-ssh-sources", "digitalocean-http-sources",
   "r2-bucket", "r2-endpoint",
 ];
+
+// DigitalOcean droplet names: letters, digits, dots and hyphens, up to 63
+// characters, starting and ending alphanumeric.
+const digitaloceanNameRe = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?$/;
 
 const hostRe = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 // name:tag, name@sha256:..., or name:tag@sha256:... A digest is the only
@@ -39,6 +49,26 @@ export const imageKeys = [
 
 export function missing(x: unknown): boolean {
   return x == null || (typeof x === "string" && !x.trim());
+}
+
+// Absent, blank or REPLACE_ME all mean 'use the profile' (Compute Name
+// Standard §2: presence is the only switch).
+export function placeholder(value: unknown): boolean {
+  return missing(value) || String(value).trim() === "REPLACE_ME";
+}
+
+// What this deployment calls its machine. The one function that answers it —
+// every label, including the firewall's, derives from this and never from the
+// raw override key or a second copy of the profile (§3).
+export function computeName(opts: Opts): string {
+  const override = opts["digitalocean-name"];
+  return placeholder(override) ? String(opts.profile ?? "") : String(override).trim();
+}
+
+// Whether this deployment owns its machine keypair. Delegates to ONCE, the
+// standard's reference implementation, so one rule decides it everywhere.
+export function keygen(opts: Opts): boolean {
+  return onceSsh.keygen(opts);
 }
 
 export function envErrors(env: Record<string, string | undefined>): string[] {
@@ -81,6 +111,9 @@ export function stateErrors(opts: Opts): string[] {
     if (!missing(opts[k]) && !positiveInt(opts[k])) {
       errors.push(`:${k} must be a positive integer`);
     }
+  }
+  if (!(placeholder(opts["digitalocean-name"]) || digitaloceanNameRe.test(computeName(opts)))) {
+    errors.push(":digitalocean-name must be a valid DigitalOcean droplet name");
   }
   if ("digitalocean-vpc-uuid" in opts) {
     errors.push(":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime");

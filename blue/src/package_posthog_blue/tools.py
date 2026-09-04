@@ -18,11 +18,12 @@ from blue.runtime import runtime
 from blue.scaffold import PRESERVE_JINJA_DELIMITERS, content_spec, scaffold
 from blue.workflow import failed
 
-from . import utils, validate
+from . import ssh, ssh_config, utils, validate
 
 infrastructure_tool = "posthog-infrastructure"
 dns_tool = "posthog-dns"
 ansible_tool = "posthog-ansible"
+ansible_local_tool = "posthog-ansible-local"
 
 ROOT = Path(__file__).parent / "resources"
 template_opts = PRESERVE_JINJA_DELIMITERS
@@ -78,6 +79,8 @@ def output_params(result: dict) -> dict | None:
 
 def infrastructure_data(opts: dict) -> dict:
     return {**opts,
+            "ssh-keygen": validate.keygen(opts),
+            "compute-name": validate.compute_name(opts),
             "ssh-sources-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-ssh-sources")),
             "http-sources-hcl": tofu.hcl_list(cidrs(opts, "digitalocean-http-sources"))}
 
@@ -144,6 +147,44 @@ async def dns_step(opts: dict) -> dict:
                                      env=credential_env(opts, "provider-dns"))
 
 
+# --- ~/.ssh/config (local) ---------------------------------------------------
+
+
+def ansible_local_data(opts: dict) -> dict:
+    """Only what a `build` genuinely knows. The address, the user and the alias
+    are run-time facts and reach the play as extra-vars instead, so the
+    rendered playbook carries no IP and is identical on every workstation (SSH
+    Config Standard §6)."""
+    return {**opts,
+            "ssh-keygen": validate.keygen(opts),
+            "ssh-config-identity-file": ssh_config.identity_file(opts)}
+
+
+def ansible_local_specs(opts: dict) -> list[dict]:
+    dir = tool_dir(opts, ansible_local_tool)
+    data = ansible_local_data(opts)
+    return [spec(template("ansible-local", name), f"{dir}/{name}", data)
+            for name in ["ansible.cfg", "inventory.ini", "main.yml"]]
+
+
+async def ansible_local_step(opts: dict) -> dict:
+    """Write or remove the `~/.ssh/config` block. The same playbook serves both
+    events; `block_state` is what distinguishes them."""
+    dir = tool_dir(opts, ansible_local_tool)
+    delete = opts.get("blue/event") == "delete"
+    return await ansible_with_spec(
+        opts, ansible_local_specs(opts),
+        dir=dir, inventory="inventory.ini",
+        playbooks={"create": "main.yml", "delete": "main.yml"},
+        extra_vars={"host_alias": ssh_config.host_alias(opts),
+                    "ip": opts.get("ip") or fallback_params(opts)["ip"],
+                    "user": opts.get("user") or "root",
+                    "block_state": "absent" if delete else "present"})
+
+
+# --- Ansible -----------------------------------------------------------------
+
+
 def _java_double(x: float) -> str:
     """Java's Double.toString, which is what Green's cheshire JSON emits for
     floats: decimal between 1e-3 and 1e7, `d.dddE±e` scientific outside it.
@@ -201,8 +242,12 @@ def inventory(opts: dict) -> str:
 
 
 def ansible_data(opts: dict) -> dict:
+    """Template values for the Ansible stage. `ssh-private-key-path` reaches
+    ansible.cfg so convergence uses the deployment's own key in keygen mode,
+    where nothing guarantees an agent holds it."""
     return {**opts,
             "ip": opts.get("ip") or "192.0.2.10",
+            "ssh-keygen": validate.keygen(opts),
             "posthog-web-port": opts.get("posthog-web-port") or 8000,
             "posthog-backup-access-key":
                 "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID') }}",
@@ -261,25 +306,29 @@ async def http_status(args: list[str]) -> str | None:
     return r.out.strip() if r.exit == 0 else None
 
 
-async def ssh_out(ip, command: str, timeout: int) -> str | None:
+async def ssh_out(opts: dict, command: str, timeout: int) -> str | None:
+    """Run ``command`` on the instance over ssh. In keygen mode the
+    deployment's own key is selected explicitly (``ssh.identity_args``),
+    because nothing guarantees an agent holds it."""
     r = await runtime.exec(
         ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-         f"root@{ip}", command], timeout_ms=timeout)
+         *ssh.identity_args(opts), f"root@{opts.get('ip')}", command],
+        timeout_ms=timeout)
     return r.out.strip() if r.exit == 0 else None
 
 
-async def psql(ip, query: str) -> str | None:
-    out = await ssh_out(ip, "cd /opt/posthog && docker compose exec -T db psql -U posthog"
+async def psql(opts: dict, query: str) -> str | None:
+    out = await ssh_out(opts, "cd /opt/posthog && docker compose exec -T db psql -U posthog"
                         f" -d posthog -tAc '{query}'", 30000)
     s = str("" if out is None else out)
     return s or None
 
 
-async def clickhouse(ip, query: str) -> str | None:
+async def clickhouse(opts: dict, query: str) -> str | None:
     """Resolve the events table from system.tables so the check does not
     hardcode a database name PostHog's migrations own, then run ``query``
     against it."""
-    out = await ssh_out(ip, "cd /opt/posthog && "
+    out = await ssh_out(opts, "cd /opt/posthog && "
                         "t=$(docker compose exec -T clickhouse clickhouse-client"
                         " --query \"SELECT database || '.' || name FROM system.tables"
                         " WHERE name = 'events' AND database NOT IN ('system')"
@@ -290,12 +339,12 @@ async def clickhouse(ip, query: str) -> str | None:
     return s or None
 
 
-async def event_count(ip) -> int | None:
-    return _parse_long(await clickhouse(ip, "SELECT count() FROM $t"))
+async def event_count(opts: dict) -> int | None:
+    return _parse_long(await clickhouse(opts, "SELECT count() FROM $t"))
 
 
-async def project_api_key(ip) -> str | None:
-    return await psql(ip, "select api_token from posthog_team order by id limit 1")
+async def project_api_key(opts: dict) -> str | None:
+    return await psql(opts, "select api_token from posthog_team order by id limit 1")
 
 
 async def wait_health(url: str, attempts: int) -> bool:
@@ -333,12 +382,12 @@ def ingestion_verdict(status, before, after) -> str:
     return "rejected"
 
 
-async def wait_ingested(ip, baseline: int, attempts: int):
+async def wait_ingested(opts: dict, baseline: int, attempts: int):
     """Capture is asynchronous through the Celery worker, so poll rather than
     sampling once."""
     n = attempts
     while True:
-        after = await event_count(ip)
+        after = await event_count(opts)
         if isinstance(after, int) and after > baseline:
             return after
         if n <= 0:
@@ -351,9 +400,9 @@ rclone_env = ("RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare "
               "RCLONE_CONFIG_R2_REGION=auto RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true")
 
 
-async def backup_listing(opts: dict, ip) -> list[dict] | None:
+async def backup_listing(opts: dict) -> list[dict] | None:
     out = await ssh_out(
-        ip, "set -a; . /etc/posthog-backup.env; set +a; " + rclone_env +
+        opts, "set -a; . /etc/posthog-backup.env; set +a; " + rclone_env +
         " RCLONE_CONFIG_R2_ACCESS_KEY_ID=\"$POSTHOG_BACKUP_R2_ACCESS_KEY_ID\""
         " RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=\"$POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY\""
         f" RCLONE_CONFIG_R2_ENDPOINT=\"{opts.get('posthog-backup-r2-endpoint')}\""
@@ -384,19 +433,19 @@ def fresh_backup(entries, since: datetime) -> bool:
     return False
 
 
-async def run_backup(ip) -> str | None:
+async def run_backup(opts: dict) -> str | None:
     return await ssh_out(
-        ip, "systemctl start posthog-backup.service && systemctl is-active posthog-backup.timer",
+        opts, "systemctl start posthog-backup.service && systemctl is-active posthog-backup.timer",
         600000)
 
 
-async def background_jobs(ip) -> str | None:
+async def background_jobs(opts: dict) -> str | None:
     """PostHog's own answers, not ours: whether Celery is alive, and whether any
     async migration is still pending. A pending one stops the worker starting at
     all, and the ingestion path this step already exercises never touches Celery
     -- so background jobs can be entirely dead while capture works."""
     return await ssh_out(
-        ip, "cd /opt/posthog && docker compose exec -T web python manage.py shell -c "
+        opts, "cd /opt/posthog && docker compose exec -T web python manage.py shell -c "
         "\"from posthog.utils import is_celery_alive; "
         "from posthog.models.async_migration import AsyncMigration; "
         "print('celery=%s pending=%d' % (is_celery_alive(), "
@@ -419,13 +468,12 @@ async def acceptance_step(opts: dict) -> dict:
     if opts.get("blue/event") != "create":
         return {**opts, "blue/exit": 0}
     base = f"https://{opts.get('posthog-host')}"
-    ip = opts.get("ip")
     since = datetime.now(timezone.utc) - timedelta(seconds=120)
     if not await wait_health(base, 60):
         return {**opts, "blue/exit": 1,
                 "blue/err": "HTTPS health did not become ready with a valid certificate"}
-    api_key = await project_api_key(ip)
-    before = await event_count(ip)
+    api_key = await project_api_key(opts)
+    before = await event_count(opts)
     if not (isinstance(before, int) and not isinstance(before, bool)):
         return {**opts, "blue/exit": 1,
                 "blue/err": "could not read the ClickHouse events table to verify capture"}
@@ -433,19 +481,19 @@ async def acceptance_step(opts: dict) -> dict:
         verdict = "not-configured"
     else:
         status = await send_event(base, api_key)
-        after = await wait_ingested(ip, before, 12)
+        after = await wait_ingested(opts, before, 12)
         verdict = ingestion_verdict(status, before, after)
-    background = background_verdict(await background_jobs(ip))
+    background = background_verdict(await background_jobs(opts))
     if verdict in ("dropped", "rejected", "unreachable"):
         return {**opts, "blue/exit": 1,
                 "blue/err": f"synthetic event was not captured: {verdict}"}
     if background != "ok":
         return {**opts, "blue/exit": 1,
                 "blue/err": f"background jobs are not healthy: {background}"}
-    if await run_backup(ip) is None:
+    if await run_backup(opts) is None:
         return {**opts, "blue/exit": 1,
                 "blue/err": "backup unit or timer is not healthy"}
-    if not fresh_backup(await backup_listing(opts, ip), since):
+    if not fresh_backup(await backup_listing(opts), since):
         return {**opts, "blue/exit": 1,
                 "blue/err": ("no backup object newer than this run under r2:"
                              f"{opts.get('posthog-backup-r2-bucket')}/{opts.get('profile')}")}

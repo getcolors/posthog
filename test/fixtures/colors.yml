@@ -1,6 +1,9 @@
-# Desired state for posthog. Non-secret values only.
-# Credentials belong in the gitignored .envrc.private as COLORS_PAR_* variables.
-# Never export COLORS_PAR_PROFILE: it selects this deployment's remote state.
+# Deterministic, credential-free fixture for tests and goldens.
+#
+# Keygen mode: no digitalocean-ssh-keys, so the package owns the machine
+# keypair per the SSH Keypair Standard, and no digitalocean-name, so the
+# droplet is named after the profile per the Compute Name Standard. The
+# opt-out variant is fixtures/optout.yml.
 #
 # Required credentials:
 #   DigitalOcean    COLORS_PAR_DO_TOKEN
@@ -59,11 +62,9 @@ posthog-backup-retention-days: 7
 
 # --- DigitalOcean -----------------------------------------------------------
 
-digitalocean-name: posthog-fixture
 digitalocean-region: ams3
 digitalocean-size: s-4vcpu-8gb
 digitalocean-image: ubuntu-24-04-x64
-digitalocean-ssh-keys: "58495393"
 
 # No VPC ID or VPC desired-state key exists intentionally. At runtime the
 # compute stage must discover and attach the account's default VPC for ams3.

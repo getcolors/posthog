@@ -44,7 +44,7 @@ wheels = [
 [[package]]
 name = "package-once-blue"
 version = "0.1.0"
-source = { git = "https://github.com/getcolors/once.git?subdirectory=blue&rev=98d3cfa2c743b89a72bac0252c258f9edeedcad7#98d3cfa2c743b89a72bac0252c258f9edeedcad7" }
+source = { git = "https://github.com/getcolors/once.git?subdirectory=blue&rev=759eb0311b4bdf881eab813cfe5d00f76b9310cc#759eb0311b4bdf881eab813cfe5d00f76b9310cc" }
 dependencies = [
     { name = "blue" },
 ]
@@ -67,7 +67,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "blue", git = "https://github.com/getcolors/blue.git?rev=290f313ead5ca162875c33a049c880da017eae09" },
-    { name = "package-once-blue", git = "https://github.com/getcolors/once.git?subdirectory=blue&rev=98d3cfa2c743b89a72bac0252c258f9edeedcad7" },
+    { name = "package-once-blue", git = "https://github.com/getcolors/once.git?subdirectory=blue&rev=759eb0311b4bdf881eab813cfe5d00f76b9310cc" },
 ]
 
 [package.metadata.requires-dev]

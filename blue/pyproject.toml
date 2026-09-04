@@ -10,13 +10,12 @@ dependencies = [
 
 [tool.uv.sources]
 blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
-package-once-blue = { git = "https://github.com/getcolors/once.git", subdirectory = "blue", rev = "98d3cfa2c743b89a72bac0252c258f9edeedcad7" }
+package-once-blue = { git = "https://github.com/getcolors/once.git", subdirectory = "blue", rev = "759eb0311b4bdf881eab813cfe5d00f76b9310cc" }
 
-# The ONCE pin above carries its own, older blue pin
-# (369c5aafea790a03b649b3513003651e672f3f57); without this override the two git
-# URLs conflict and uv refuses to resolve. The override makes this package's
-# blue pin the one that wins, the way tools.deps lets the top-level green pin
-# win in green/deps.edn.
+# The ONCE pin above carries its own, older blue pin; without this override the
+# two git URLs conflict and uv refuses to resolve. The override makes this
+# package's blue pin the one that wins, the way tools.deps lets the top-level
+# green pin win in green/deps.edn.
 [tool.uv]
 override-dependencies = [
     "blue @ git+https://github.com/getcolors/blue.git@290f313ead5ca162875c33a049c880da017eae09",

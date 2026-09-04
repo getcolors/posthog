@@ -6,7 +6,7 @@
 # [tool.uv.sources]
 # package-posthog-blue = { git = "https://github.com/getcolors/posthog.git", rev = "e49f772f6660c36a63ef2cd2735202b406a3c8df", subdirectory = "blue" }
 # blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
-# package-once-blue = { git = "https://github.com/getcolors/once.git", subdirectory = "blue", rev = "98d3cfa2c743b89a72bac0252c258f9edeedcad7" }
+# package-once-blue = { git = "https://github.com/getcolors/once.git", subdirectory = "blue", rev = "759eb0311b4bdf881eab813cfe5d00f76b9310cc" }
 #
 # [tool.uv]
 # override-dependencies = ["blue @ git+https://github.com/getcolors/blue.git@290f313ead5ca162875c33a049c880da017eae09"]

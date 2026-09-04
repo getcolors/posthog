@@ -3,8 +3,9 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [green.ansible :as ansible]
+            [green.process :as process]
             [io.github.getcolors.posthog.tools :as tools]
-            [io.github.getcolors.posthog.validate-test :refer [fixture]]))
+            [io.github.getcolors.posthog.validate-test :refer [fixture optout]]))
 
 (deftest delete-cleanup-skips-when-state-has-no-compute
   ;; With the instance already gone the inventory would render 192.0.2.10;
@@ -27,6 +28,36 @@
 (deftest infrastructure-discovers-default-vpc
   (let [data (tools/infrastructure-data (fixture))]
     (is (= ["0.0.0.0/0" "::/0"] (tools/cidrs data :digitalocean-http-sources)))))
+
+(deftest infrastructure-data-carries-the-ssh-mode-and-the-compute-name
+  (is (true? (:ssh-keygen (tools/infrastructure-data (fixture)))))
+  (is (false? (:ssh-keygen (tools/infrastructure-data (optout)))))
+  (is (= "posthog-fixture" (:compute-name (tools/infrastructure-data (fixture)))))
+  (is (= "posthog-optout" (:compute-name (tools/infrastructure-data (optout))))))
+
+(deftest ansible-stage-names-the-generated-key-in-keygen-mode
+  ;; Remote Ansible must be able to use the generated key: nothing guarantees
+  ;; an agent holds it, so ansible.cfg names it under private_key_file.
+  (let [data (tools/ansible-data (assoc (fixture) :ssh-keygen true
+                                        :ssh-private-key-path "/home/x/.ssh/posthog-fixture"))]
+    (is (true? (:ssh-keygen data)))
+    (is (= "/home/x/.ssh/posthog-fixture" (:ssh-private-key-path data))))
+  (is (false? (:ssh-keygen (tools/ansible-data (optout))))))
+
+(deftest acceptance-ssh-selects-the-generated-key
+  ;; Every ssh the acceptance step runs threads the identity arguments, so the
+  ;; check reaches the host with the deployment's own key in keygen mode and
+  ;; with the operator's arrangements in opt-out mode.
+  (let [seen (atom nil)]
+    (with-redefs [process/run-with-timeout (fn [args _ _] (reset! seen args) {:exit 0 :out "ok\n"})]
+      (is (= "ok" (tools/ssh-out {:ip "203.0.113.7" :ssh-keygen true
+                                  :ssh-private-key-path "/home/x/.ssh/posthog-fixture"}
+                                 "true" 1000)))
+      (is (= ["-o" "IdentitiesOnly=yes" "-i" "/home/x/.ssh/posthog-fixture"]
+             (subvec @seen 5 9)))
+      (is (= "root@203.0.113.7" (nth @seen 9)))
+      (tools/ssh-out {:ip "203.0.113.7"} "true" 1000)
+      (is (= "root@203.0.113.7" (nth @seen 5)) "opt-out passes no identity"))))
 
 (deftest dns-is-apex-and-proxied
   (let [json (tools/dns-json (assoc (fixture) :ip "192.0.2.10" :posthog-zone "example.com"))]

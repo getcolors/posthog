@@ -6,6 +6,8 @@
             [green.progress :as progress]
             [green.tofu :as tofu]
             [green.workflow :as wf]
+            [io.github.getcolors.posthog.ssh :as ssh]
+            [io.github.getcolors.posthog.ssh-config :as ssh-config]
             [io.github.getcolors.posthog.tools :as tools]
             [io.github.getcolors.posthog.validate :as validate]))
 
@@ -41,6 +43,40 @@
                                   (green-cli/par-name :ip)
                                   " to address the instance directly"))))))
 
+(defn best-effort-state
+  "`state-output` for the keypair's create matrix, which keys on a best-effort
+  read: an unreadable state (a fresh clone, a missing backend) counts as absent
+  on a create. The fail-closed reading above is the delete path's alone."
+  [opts]
+  (try (state-output opts) (catch Exception _ nil)))
+
+(defn after-validate
+  "The lifecycle transition table, once the validators have passed.
+
+  build and dry-run only render: `with-machine-key` fills the placeholder key
+  paths and nothing under `~/.ssh` or `~/.ssh/config` is read. A real create
+  runs the keypair's create matrix and the DigitalOcean preflight before any
+  template is rendered — an unowned key on disk or at the provider stops the
+  run while stopping is still free — then the `~/.ssh/config` ownership and
+  placement checks. A real delete fills the same template values (a destroy
+  renders before it destroys) and adopts the instance address from state,
+  fail-closed; it checks no key, because its cleanup runs after the destroy."
+  [opts {:keys [event real?]}]
+  (cond
+    (and real? (= :delete event))
+    (adopt-state (ssh/with-machine-key opts))
+
+    (and real? (= :create event))
+    (let [opts (ssh/ensure-key! opts best-effort-state)]
+      (if (wf/failed? opts)
+        opts
+        (let [opts (ssh/preflight! (ssh/with-machine-key opts))
+              opts (if (wf/failed? opts) opts (ssh-config/preflight! opts))]
+          (if (wf/failed? opts) opts (assoc opts :green/exit 0)))))
+
+    :else
+    (assoc (ssh/with-machine-key opts) :green/exit 0)))
+
 (defn start-step
   ([opts] (start-step opts (System/getenv)))
   ([opts env]
@@ -56,22 +92,27 @@
              (when (and real? (= :delete event) (:compute-prevent-destroy opts))
                [(str "compute destruction is protected; set "
                      (green-cli/par-name :compute-prevent-destroy) "=false to delete")]))]
-          :after-validate
-          (fn [opts _ {:keys [event real?]}]
-            (if (and real? (= :delete event))
-              (adopt-state opts)
-              (assoc opts :green/exit 0)))} env)))
+          :after-validate (fn [opts _ context] (after-validate opts context))} env)))
 
 (defn wire-fn [step run-opts]
   (if (= :delete (:green/event run-opts))
     (case step
       :posthog/start [start-step :posthog/ansible]
       :posthog/ansible [tools/ansible-step :posthog/dns]
-      :posthog/dns [tools/dns-step :posthog/infrastructure]
-      :posthog/infrastructure [tools/infrastructure-step])
+      ;; The `~/.ssh/config` block goes before the destroy, the opposite of the
+      ;; keypair below. A block that outlives its host is stale but harmless; a
+      ;; key that predeceases its host locks the operator out of a machine that
+      ;; still exists. Both orders are deliberate; see standards/ssh-config.md.
+      :posthog/dns [tools/dns-step :posthog/ssh-config]
+      :posthog/ssh-config [tools/ansible-local-step :posthog/infrastructure]
+      :posthog/infrastructure [tools/infrastructure-step :posthog/ssh-cleanup]
+      :posthog/ssh-cleanup [ssh/cleanup-step])
     (case step
       :posthog/start [start-step :posthog/infrastructure]
-      :posthog/infrastructure [tools/infrastructure-step :posthog/dns]
+      ;; After compute, which is where the address first exists, and before the
+      ;; stage that converges the machine.
+      :posthog/infrastructure [tools/infrastructure-step :posthog/ssh-config]
+      :posthog/ssh-config [tools/ansible-local-step :posthog/dns]
       :posthog/dns [tools/dns-step :posthog/ansible]
       :posthog/ansible [tools/ansible-step :posthog/acceptance]
       :posthog/acceptance [tools/acceptance-step])))
@@ -81,7 +122,9 @@
    {:dir-fn #(tools/tool-dir % tool)
     :key-fn #(str (:profile %) "/" tool ".tfstate")}))
 
-(def side-effecting [:posthog/infrastructure :posthog/dns :posthog/ansible :posthog/acceptance])
+(def side-effecting
+  [:posthog/infrastructure :posthog/dns :posthog/ssh-config
+   :posthog/ansible :posthog/acceptance :posthog/ssh-cleanup])
 
 (def workflow
   (-> (wf/workflow {:start :posthog/start :wire-fn wire-fn})

@@ -30,7 +30,7 @@ chmod +x green
 
   <h2>Architecture and components</h2>
   <div class="grid">
-    <div class="card"><h3>Compute</h3><p>OpenTofu discovers the configured region’s default VPC at plan time and creates one Ubuntu 24.04 Droplet plus a firewall. No VPC is created and no VPC UUID belongs in desired state.</p></div>
+    <div class="card"><h3>Compute</h3><p>OpenTofu discovers the configured region’s default VPC at plan time and creates one Ubuntu 24.04 Droplet, named after the profile, plus a firewall. No VPC is created and no VPC UUID belongs in desired state. With no <code>digitalocean-ssh-keys</code> the deployment owns its machine key: <code>~/.ssh/&lt;profile&gt;</code> is generated on the first create, registered under the profile name, and removed only after a successful delete.</p></div>
     <div class="card"><h3>Public boundary</h3><p>Cloudflare publishes one proxied A record. Caddy sends <code>/capture</code>, <code>/e</code>, <code>/batch</code>, <code>/i/*</code>, <code>/track</code>, <code>/engage</code> and <code>/s</code> to the capture service, and everything else to the application.</p></div>
     <div class="card"><h3>Sizing</h3><p><code>s-8vcpu-16gb</code>. This is not the same shape as the other analytics packages: 8 GiB wedged the machine hard enough that <code>sshd</code> could not fork, and upstream’s own hobby minimum is 16 GiB.</p></div>
     <div class="card"><h3>Reproducibility</h3><p>The application and plugin server images are pinned to <strong>one commit</strong>. They share a Postgres schema, and floating tags on either side let the node process query columns the application’s migrations never created.</p></div>
@@ -76,9 +76,10 @@ chmod +x green
 
   <h2>Acceptance and operations</h2>
   <pre><code>./green create
-ssh &lt;droplet&gt; 'cd /opt/posthog &amp;&amp; docker compose ps'
-ssh &lt;droplet&gt; 'cd /opt/posthog &amp;&amp; docker compose logs --tail=50 plugins'
-ssh &lt;droplet&gt; 'systemctl status posthog-backup.timer'</code></pre>
+ssh &lt;profile&gt; 'cd /opt/posthog &amp;&amp; docker compose ps'
+ssh &lt;profile&gt; 'cd /opt/posthog &amp;&amp; docker compose logs --tail=50 plugins'
+ssh &lt;profile&gt; 'systemctl status posthog-backup.timer'</code></pre>
+  <p>Convergence writes a <code>~/.ssh/config</code> block aliased to the profile, so <code>ssh &lt;profile&gt;</code> needs no address, user or identity flag.</p>
   <p>Acceptance runs at the end of <code>create</code> and reports only what it checked:</p>
   <ul>
     <li><strong>HTTPS with certificate verification.</strong> <code>/_health/</code> must answer over a valid certificate; the check never disables verification.</li>

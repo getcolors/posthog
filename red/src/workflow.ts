@@ -6,7 +6,9 @@ import * as dryRun from "red/dry-run";
 import { preflight } from "red/lifecycle";
 import * as progress from "red/progress";
 import * as tofu from "red/tofu";
-import { adviceAdd, workflow, type Opts, type WireDecl } from "red/workflow";
+import { adviceAdd, failed, workflow, type Opts, type WireDecl } from "red/workflow";
+import * as ssh from "./ssh.ts";
+import * as sshConfig from "./ssh-config.ts";
 import * as tools from "./tools.ts";
 import * as validate from "./validate.ts";
 
@@ -49,6 +51,41 @@ export async function adoptState(opts: Opts): Promise<Opts> {
   }
 }
 
+// `stateOutput` for the keypair's create matrix, which keys on a best-effort
+// read: an unreadable state (a fresh clone, a missing backend) counts as absent
+// on a create. The fail-closed reading above is the delete path's alone.
+export async function bestEffortState(opts: Opts): Promise<Opts | undefined> {
+  try {
+    return await stateOutput(opts);
+  } catch {
+    return undefined;
+  }
+}
+
+// The lifecycle transition table, once the validators have passed.
+//
+// build and dry-run only render: `withMachineKey` fills the placeholder key
+// paths and nothing under `~/.ssh` or `~/.ssh/config` is read. A real create
+// runs the keypair's create matrix and the DigitalOcean preflight before any
+// template is rendered — an unowned key on disk or at the provider stops the
+// run while stopping is still free — then the `~/.ssh/config` ownership and
+// placement checks. A real delete fills the same template values (a destroy
+// renders before it destroys) and adopts the instance address from state,
+// fail-closed; it checks no key, because its cleanup runs after the destroy.
+export async function afterValidate(
+  opts: Opts, { event, real }: { event?: string; real?: boolean },
+): Promise<Opts> {
+  if (real && event === "delete") return adoptState(ssh.withMachineKey(opts));
+  if (real && event === "create") {
+    let next = await ssh.ensureKey(opts, bestEffortState);
+    if (failed(next)) return next;
+    next = await ssh.preflight(ssh.withMachineKey(next));
+    if (!failed(next)) next = sshConfig.preflight(next);
+    return failed(next) ? next : { ...next, "red/exit": 0 };
+  }
+  return { ...ssh.withMachineKey(opts), "red/exit": 0 };
+}
+
 export async function startStep(
   opts: Opts,
   env: Record<string, string | undefined> = process.env,
@@ -68,10 +105,7 @@ export async function startStep(
           ? [`compute destruction is protected; set ${parName("compute-prevent-destroy")}=false to delete`]
           : [],
     ],
-    afterValidate: (current, _environment, { event, real }) =>
-      real && event === "delete"
-        ? adoptState(current)
-        : { ...current, "red/exit": 0 },
+    afterValidate: (current, _environment, context) => afterValidate(current, context),
   }, env);
 }
 
@@ -80,14 +114,23 @@ export function wireFn(step: string, runOpts: Opts): WireDecl | undefined {
     const graph: Record<string, WireDecl> = {
       "posthog/start": [startStep, "posthog/ansible"],
       "posthog/ansible": [tools.ansibleStep, "posthog/dns"],
-      "posthog/dns": [tools.dnsStep, "posthog/infrastructure"],
-      "posthog/infrastructure": [tools.infrastructureStep],
+      // The `~/.ssh/config` block goes before the destroy, the opposite of the
+      // keypair below. A block that outlives its host is stale but harmless; a
+      // key that predeceases its host locks the operator out of a machine that
+      // still exists. Both orders are deliberate; see standards/ssh-config.md.
+      "posthog/dns": [tools.dnsStep, "posthog/ssh-config"],
+      "posthog/ssh-config": [tools.ansibleLocalStep, "posthog/infrastructure"],
+      "posthog/infrastructure": [tools.infrastructureStep, "posthog/ssh-cleanup"],
+      "posthog/ssh-cleanup": [ssh.cleanupStep],
     };
     return graph[step];
   }
   const graph: Record<string, WireDecl> = {
     "posthog/start": [startStep, "posthog/infrastructure"],
-    "posthog/infrastructure": [tools.infrastructureStep, "posthog/dns"],
+    // After compute, which is where the address first exists, and before the
+    // stage that converges the machine.
+    "posthog/infrastructure": [tools.infrastructureStep, "posthog/ssh-config"],
+    "posthog/ssh-config": [tools.ansibleLocalStep, "posthog/dns"],
     "posthog/dns": [tools.dnsStep, "posthog/ansible"],
     "posthog/ansible": [tools.ansibleStep, "posthog/acceptance"],
     "posthog/acceptance": [tools.acceptanceStep],
@@ -103,7 +146,8 @@ export function backendAdvice(tool: string) {
 }
 
 export const sideEffecting = [
-  "posthog/infrastructure", "posthog/dns", "posthog/ansible", "posthog/acceptance",
+  "posthog/infrastructure", "posthog/dns", "posthog/ssh-config",
+  "posthog/ansible", "posthog/acceptance", "posthog/ssh-cleanup",
 ];
 
 function create() {

@@ -70,11 +70,19 @@ posthog-backup-retention-days: 7
 
 # --- DigitalOcean -----------------------------------------------------------
 
-digitalocean-name: posthog-example
 digitalocean-region: ams3
 digitalocean-size: s-4vcpu-8gb
 digitalocean-image: ubuntu-24-04-x64
-digitalocean-ssh-keys: "58495393"
+
+# The droplet is named after the profile (Compute Name Standard). Set
+# digitalocean-name only when the account needs a different label.
+# digitalocean-name: posthog-example
+
+# The machine keypair (SSH Keypair Standard). Absent, the package generates and
+# owns ~/.ssh/<profile> and registers it at DigitalOcean under the profile name;
+# `ssh <profile>` then works through the managed ~/.ssh/config block. Supplying
+# an existing account key id opts out, and the package touches no key material.
+# digitalocean-ssh-keys: "58495393"
 
 # No VPC ID or VPC desired-state key exists intentionally. At runtime the
 # compute stage must discover and attach the account's default VPC for ams3.
