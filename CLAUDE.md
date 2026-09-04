@@ -214,13 +214,16 @@ token is the selected provider's alone: `COLORS_PAR_DO_TOKEN` or
 The package pins Green and ONCE in `green/deps.edn`, the Red SDK and
 `package-once-red` in `red/package.json`, and the Blue SDK and
 `package-once-blue` in `blue/pyproject.toml`. All three colours pin ONCE at the
-**same rev** (`04f9623`) — ONCE's own parity is what guarantees its colours
+**same rev** (`38e3cd6`) — ONCE's own parity is what guarantees its colours
 agree per commit. ONCE supplies the state-backend provider registry (backend
 secrets and `tofu-env`), the whole SSH Keypair Standard implementation, and
 the Compute Provider Standard's operations (`compute`), so the pin can never
-go below `04f9623`, the commit whose green `read-state` counts the SDK's
-launch failure on a missing stage directory as an unreadable state (a create
-on a fresh clone reports its missing credentials instead of crashing), itself
+go below `38e3cd6`, the commit whose `read-state` trusts the SDK's step
+error alone as the unreadable-backend shape — which is why the Green pin
+cannot go below `3f33f5d`, the SDK commit that reports a `tofu output` launch
+failure (a missing stage directory on a fresh clone) as that step error, so a
+create there reports its missing credentials instead of crashing; the two
+pins move together — itself
 above `417d5f7`, the commit that added `compute`, and `bc06f2f`, the commit
 that moved the machine keypair into the operator's `~/.ssh`; a bump is its
 own change. The same ONCE rev is
