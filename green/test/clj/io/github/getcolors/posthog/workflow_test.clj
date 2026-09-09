@@ -21,3 +21,7 @@
    (let [result (workflow/start-step opts {})] (is (= 1 @calls)) (is (= "203.0.113.99" (:ip result))) (is (= "ubuntu" (:user result)))))
   (with-redefs [validate/secret-errors (constantly []) compute/load-step (fn [o _] (assoc o :green/exit 1 :green/err "state unreadable"))]
    (is (= 1 (:green/exit (workflow/start-step opts {})))))))
+
+(deftest library-document-keys-render-deterministically
+ (is (= (#'io.github.getcolors.posthog.compute/compute-json {"a" 0 :b 1} 0)
+        (#'io.github.getcolors.posthog.compute/compute-json {:a 0 "b" 1} 0))))
