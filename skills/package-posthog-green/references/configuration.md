@@ -49,7 +49,7 @@ PostHog and its data services. Build first to check adapter capabilities.
 
 Use `posthog-ssh-sources` and `posthog-http-sources` for neutral CIDR
 allowlists. Existing selected-provider source options remain compatible.
-External account key references require `ssh-private-key-path`; external
+External account key references may use `ssh-private-key-path` or operator/agent SSH configuration; external
 private keys are never generated or removed. The local SSH block writes
 `IdentityFile` only for a managed deployment key.
 
@@ -91,7 +91,7 @@ workspace SSH Keypair Standard:
 - `build` and `--dry-run` never read or create anything under `~/.ssh`; they
   render a fixed placeholder path so output stays byte-identical everywhere.
 
-External key references require `ssh-private-key-path`; the library never
+External key references may use `ssh-private-key-path` or operator/agent SSH configuration; the library never
 replaces or removes that private key.
 
 ## Reaching the host

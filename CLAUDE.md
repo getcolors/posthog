@@ -67,7 +67,7 @@ Read `../workspace/standards/ssh-keypair.md` and `ssh-config.md` before edits.
 The library owns key mode, registration preflight, journaled generation,
 fingerprint checks and cleanup. Managed keys live at `~/.ssh/<profile>` and
 are removed only after owned compute resources are destroyed. External provider
-key references require `ssh-private-key-path`; external key material is never
+key references may use `ssh-private-key-path` or operator/agent SSH configuration; external key material is never
 generated, rotated or deleted. There is no package `ssh-cleanup` step.
 
 The package SSH helper only formats identities and deterministic build paths.
