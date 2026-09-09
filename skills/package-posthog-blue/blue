@@ -5,7 +5,7 @@
 #
 # [tool.uv.sources]
 # colors-compute-blue = { git = "https://github.com/getcolors/colors-compute.git", rev = "422c3f39d22be93efa703da09eb192490942ede3", subdirectory = "blue" }
-# package-posthog-blue = { git = "https://github.com/getcolors/posthog.git", rev = "6a555cf1c837195dd0c0e55b08e7ac9ec4fbb39a", subdirectory = "blue" }
+# package-posthog-blue = { git = "https://github.com/getcolors/posthog.git", rev = "eb9895773f0763e2991bf5c23eeb3fd2bb60b6ec", subdirectory = "blue" }
 # blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
 # package-once-blue = { git = "https://github.com/getcolors/once.git", subdirectory = "blue", rev = "38e3cd66674a32fb96605e1b17ae6791086ad5c1" }
 #
