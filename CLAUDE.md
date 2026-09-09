@@ -3,8 +3,7 @@
 ## Repository
 
 `posthog` is a tri-colour Package Skill (green, red, blue) for a single-node
-PostHog analytics suite on DigitalOcean or Vultr. It manages OpenTofu
-compute/firewall (with the regional default VPC lookup on DigitalOcean),
+PostHog analytics suite on one library-provisioned VM. It manages
 Cloudflare DNS, and converges a ten-container Docker Compose stack:
 the PostHog web process and Celery worker, a standalone Rust `capture` service,
 the Node plugin server, Redpanda, Temporal, PostgreSQL, ClickHouse with embedded
@@ -24,135 +23,83 @@ systemd timer running `/usr/local/sbin/posthog-backup`, taking a Postgres
 `pg_dump` and a native ClickHouse `BACKUP` — never a hot `tar`, which races the
 server's merges — uploaded to Cloudflare R2.
 
-## The two-provider golden and parity axis
+## Shared compute ownership
 
-The package supports two compute providers, `digitalocean` (the default) and
-`vultr`, per the workspace Compute Provider Standard
-(`../workspace/standards/compute-provider.md`). They are selected by template
-directory (`tools/infrastructure/<provider>/main.tf`), never by conditionals
-inside one file, so a build is the only thing that proves a provider's tree
-renders at all. `validate/compute-providers` is the registry: the advertised
-names, each one's required keys, secret and `tofu-env`; per-provider checks
-(the DigitalOcean VPC bans, the Vultr numeric os id) run only for the selected
-provider and keys of the unselected provider are accepted and ignored.
-`compute-key` scopes every provider key (`<provider>-ssh-sources`,
-`<provider>-name`) and the CIDR validator refuses an empty ssh list or any
-entry that is not a syntactically valid v4 or v6 CIDR before a provider is
-contacted.
+All three colors depend on `colors-compute`, currently pinned to `422c3f39d22be93efa703da09eb192490942ede3`.
+Read `../workspace/standards/compute-provider.md`, `compute-name.md` and
+`compute-cluster.md` before changing this boundary. This package owns only
+application requirements and singleton topology: role null, count 1. Its
+`compute` module delegates to library `plan_deployment`, `orchestrate` and
+`read_deployment`; do not add a provider registry, provider dispatch, compute
+OpenTofu templates, backend implementation, state writer or key lifecycle here.
+A newly supported provider requires only a library dependency update in consumers.
+The default remains `digitalocean`; provider capabilities and option validation
+are defined by the library. Neutral `posthog-ssh-sources` and
+`posthog-http-sources` are accepted alongside the selected adapter's legacy keys.
 
-Switching providers is a rebuild, never an apply. Every compute template
-records `provider` in its `params` output, and on every real create and delete
-the start step reads the recorded params with backend credentials only and
-refuses a mismatch — before provider-secret validation, and pre-empting it, so
-a mistaken edit reports `state holds a <recorded> machine; set
-provider-compute back to <recorded> and delete first` rather than a missing
-token for the new provider. Params without a provider (a deployment created
-before adoption) are held to `digitalocean`, and any other selection is
-refused with `state holds a machine with no recorded provider … which makes
-it a digitalocean machine; set provider-compute back to digitalocean and
-delete first`. An unreadable backend is no state on a create and, through
-`adopt-state`, fatal on a delete.
+Build writes library documents under `compute/shared` and `compute/nodes/0`.
+Each stage receives the library `backend_plan` configuration. Remote state keys
+are `<profile>/compute/shared.tfstate` and `<profile>/compute/nodes/0.tfstate`;
+S3 uses ambient AWS credentials, R2 binds its explicit backend credentials in
+private configuration. The deployment journal serializes mutations. Compute
+credential checks occur inside the library after ownership/state inspection.
+DNS remains an application stage with its separate `<profile>/posthog-dns.tfstate`.
 
-The operations behind all of that are not this package's code. Since the
-delegation, ONCE's `compute` namespace (`io.github.getcolors.once.compute`,
-the `compute` export of `package-once-red`, `package_once_blue.compute`)
-implements the Compute Provider Standard: selection, the CIDR grammar and the
-network contract, the name rules (checked on the *resolved* name, profile or
-override), the switch and legacy-state refusals, the missing-`ip` refusal,
-the state read and its adoption. What lives here is the data and the wiring —
-the registry, the default provider, the `spec` value in each colour's
-`validate` that hands both plus the sources map to ONCE, the templates, the
-fixtures and goldens, `state-output`, and the `start-step` preflight that
-calls ONCE's functions in the order above. `compute-name`, `compute-key`,
-`cidrs`, `fallback-params` and `resolved-compute` remain as package-named
-aliases so `tools` and the tests read as before. One thing is posthog's own
-and deliberately not ONCE's: the `adopt-state` wrapper that applies the
-`COLORS_PAR_IP` override after ONCE's adoption succeeded, so no other package
-gains a way to point a delete's cleanup at an arbitrary host. The
-pure-function matrix (CIDR table, name rules, per-provider checks, the switch
-rules) is tested in ONCE, in all three colours and by its parity drivers;
-this repository tests the wiring — one test per safety boundary through
-`start-step` — and one spec-content test per colour, so a colour whose spec
-drifts fails in that colour. The delegation also replaced posthog's own
-wording: the CIDR errors are now ONCE's `:<key> must list at least one CIDR`
-and `:<key> entry "<entry>" is not an IPv4 or IPv6 CIDR`, and the legacy
-state above is refused with ONCE's two-clause message rather than the plain
-switch message.
+The library refuses existing `<profile>/posthog-infrastructure.tfstate` before
+mutation. That old monolithic state needs explicit ownership migration or
+teardown using the original package version. Never delete a state object to
+bypass this refusal. Unreadable state, identity mismatches, ambiguous resource
+ownership and live results without an address fail closed. Build-only planned
+addresses must never become fallback targets for create/delete.
 
-There are four fixtures — one per provider per keypair mode —
-`test/fixtures/colors.yml` (`posthog-fixture`), `optout.yml`
-(`posthog-optout`), `colors-vultr.yml` (`posthog-vultr-fixture`) and
-`optout-vultr.yml` (`posthog-vultr-optout`), each with a committed golden
-tree. `scripts/golden.sh` checks green against all four; `scripts/parity.sh`
-renders all four through every colour and diffs the trees — and the colour
-template trees — byte for byte. A provider without a golden is not advertised.
-The live-verified matrix is recorded here once each provider has been through
-a real create: DigitalOcean by `../posthog-digitalocean`; Vultr pending
-`../posthog-vultr`.
+The joined node supplies the address, login user, provider identity and SSH
+identity for downstream application steps. Do not assume the user is root.
+No private network is requested by default. Explicit network references and
+adapter capabilities are library concerns. The ingress policy is TCP22/80/443;
+empty HTTP sources close HTTP ingress.
 
-## The SSH keypair
+An explicit `COLORS_PAR_IP` only changes the delete-cleanup target after a
+successful owned-state read; it cannot bypass the read or its provider guard.
 
-This package conforms to the workspace SSH Keypair Standard
-(`../workspace/standards/ssh-keypair.md`). Read that document before touching
-`green/src/clj/io/github/getcolors/posthog/ssh.clj` or its red/blue
-counterparts.
+## SSH lifecycle and local configuration
 
-The behaviour is ONCE's — `io.github.getcolors.once.ssh` — deliberately reused
-rather than reimplemented, so one standard has one implementation. Absent
-`<provider>-ssh-keys` in desired state means keygen mode: the package
-generates `~/.ssh/<profile>`, declares the account key resource
-(`digitalocean_ssh_key` or `vultr_ssh_key`) named after the profile and
-references it by attribute, runs the provider REST preflight before applying
-with the selected provider's token, names the key explicitly for Ansible
-(`private_key_file`) and for every acceptance `ssh`, and removes the local key
-last, only after the compute destroy succeeded. Present `<provider>-ssh-keys`
-means opt-out: the package touches no key material and renders the historical
-shape byte for byte.
+Read `../workspace/standards/ssh-keypair.md` and `ssh-config.md` before edits.
+The library owns key mode, registration preflight, journaled generation,
+fingerprint checks and cleanup. Managed keys live at `~/.ssh/<profile>` and
+are removed only after owned compute resources are destroyed. External provider
+key references require `ssh-private-key-path`; external key material is never
+generated, rotated or deleted. There is no package `ssh-cleanup` step.
 
-What this repository adds is the build placeholder. ONCE derives key paths from
-`$HOME` and commits no rendered output; posthog commits goldens, so `build` and
-`--dry-run` render `/home/build-placeholder/.ssh/<profile>` instead. That is
-why `ssh/rendered-only?` tests `:green/dry-run` as well as the event — a
-dry-run that fell through to the real path would read `~/.ssh`, which the
-standard forbids, and `bb test` covers exactly that.
+The package SSH helper only formats identities and deterministic build paths.
+Build/dry-run use `/home/build-placeholder/.ssh/<profile>` and never inspect
+operator key files or `~/.ssh/config`. Application Ansible uses the returned
+login and explicit identity for both managed and external keys.
 
-The lifecycle integration is `start-step`, not the helper modules. The compute
-state is read **once per run** (ONCE's `compute/read-state` over this
-package's `state-output`, `{:params m}` or `{:error msg}`; only the SDK's
-step error — the shape `tofu output` fails with — reads as unreadable, any
-other exception propagates as a defect), on real create and real delete only,
-before the validators, and that one read serves the provider guard,
-`ensure-key!` and the adoption. Build and dry-run fill the placeholder; a real
-create runs `ensure-key!` against the read, then the provider preflight, then
-the `~/.ssh/config` checks; a real delete fills the real paths and adopts the
-instance address through the fail-closed `adopt-state` — ONCE's
-`compute/adopt-state` (a read error exits 1) inside this package's wrapper,
-which is where an explicit `COLORS_PAR_IP` is honoured: it never skips the
-read or the guard, it only replaces a stale recorded address after the read
-succeeded. The create
-matrix itself (leftover key, foreign key, interrupted create) is ONCE's and is
-tested there; this package tests the delegation.
+The package-owned `ansible-local/main.yml` contains the workspace locked,
+atomic SSH-config updater. Keep its Python implementation identical across
+colors. Runtime alias, address, user and removal mode arrive as Ansible
+extra-vars, never rendered machine addresses. The managed block uses the profile
+alias and includes `IdentityFile`/`IdentitiesOnly` only in managed mode. The
+updater refuses conflicting unmanaged stanzas and leading global options.
+Create updates the block after compute and before DNS/convergence; delete
+removes it before compute destruction. Never replace this with `blockinfile`
+or move key cleanup ahead of resource destruction.
 
-`bb golden` renders both keypair modes for every provider because the standard
-has two modes. A change that only holds in one of them is not conforming.
+## Build and migration checks
 
-## The `~/.ssh/config` block and the compute name
+The four shared fixtures exercise managed/external keys on two adapters;
+they are regression examples, not a package provider allowlist. Run native
+Blue/Red/Green tests, Red typecheck, `scripts/parity.sh`, `scripts/golden.sh`
+and `scripts/launcher.sh`. Golden acceptance requires reviewing the generated
+application changes first. `scripts/check-compute-plan.py` checks singleton
+stages, exact backend keys, absence of inline backend secrets and absence of
+the old compute stage. Run the root example build with its workdir directed
+to a temporary directory; it is separate from fixture coverage.
 
-The `ansible-local` stage implements the workspace SSH Config Standard
-(`../workspace/standards/ssh-config.md`): one `blockinfile` task giving the
-operator `ssh <profile>`. The play is **this package's own copy** (standard
-§7), the opposite choice from `ssh.clj` above, because it writes into a file
-the operator shares with every host they reach. Address, user, alias and
-`block_state` arrive as **Ansible extra-vars, never through Selmer**, which is
-what keeps `build` byte-identical across workstations; `scripts/golden.sh`
-fails if a dotted quad ever appears under `posthog-ansible-local`. Create
-writes the block after compute and before convergence; delete removes it
-*before* the destroy, the reverse of the keypair.
-
-`<provider>-name` is optional per the Compute Name Standard
-(`../workspace/standards/compute-name.md`): `validate/compute-name` (ONCE's
-`compute/name`) resolves the profile or the override once, and every template interpolates
-`<{ compute-name }>` for the machine and its firewall.
+After dependency changes, build actual copied standalone payloads with no
+`*_LIB_ROOT` overrides. Local tests alone do not prove their dependency pins.
+Keep unrelated untracked compute-matrix artifacts out of migration commits.
+Do not claim live deployment verification from an offline build.
 
 ## Layout and commands
 
@@ -188,9 +135,8 @@ must not touch `~/.ssh`.
 
 ## Invariants
 
-`colors.yml` is flat, non-secret desired state. Validation accumulates errors
-and, on DigitalOcean, rejects every configurable VPC identifier: the OpenTofu
-data source looks up the existing default VPC by `digitalocean-region`.
+`colors.yml` is flat, non-secret desired state. Validation accumulates application errors; the library validates compute
+requirements and supported explicit network references.
 
 The root `colors.yml` is the only desired state no suite exercises — `bb test`
 is unit tests and `bb golden` uses `test/fixtures/colors.yml` — so it drifts
@@ -203,43 +149,26 @@ Two image constraints are load-bearing rather than tidiness. `posthog-image` and
 Postgres schema. `posthog-clickhouse-image` must be the version upstream pins:
 PostHog's schema puts TTLs on `DateTime64` columns, which 24.8 rejects outright.
 
-Eleven `COLORS_PAR_*` credentials are required, not six — the five application
-secrets have no defaults, and `secret-errors` fails a real `create` before the
+The five application secrets have no defaults, and `secret-errors` fails a real `create` before the
 first provider call rather than falling back to a published value. The compute
-token is the selected provider's alone: `COLORS_PAR_DO_TOKEN` or
-`COLORS_PAR_VULTR_API_KEY`.
+credentials are the selected library adapter's alone.
 
-## Coupling
+## Dependency pins and launchers
 
-The package pins Green and ONCE in `green/deps.edn`, the Red SDK and
-`package-once-red` in `red/package.json`, and the Blue SDK and
-`package-once-blue` in `blue/pyproject.toml`. All three colours pin ONCE at the
-**same rev** (`38e3cd6`) — ONCE's own parity is what guarantees its colours
-agree per commit. ONCE supplies the state-backend provider registry (backend
-secrets and `tofu-env`), the whole SSH Keypair Standard implementation, and
-the Compute Provider Standard's operations (`compute`), so the pin can never
-go below `38e3cd6`, the commit whose `read-state` trusts the SDK's step
-error alone as the unreadable-backend shape — which is why the Green pin
-cannot go below `3f33f5d`, the SDK commit that reports a `tofu output` launch
-failure (a missing stage directory on a fresh clone) as that step error, so a
-create there reports its missing credentials instead of crashing; the two
-pins move together — itself
-above `417d5f7`, the commit that added `compute`, and `bc06f2f`, the commit
-that moved the machine keypair into the operator's `~/.ssh`; a bump is its
-own change. The same ONCE rev is
-also written by hand into the red launcher's `PINS` and the blue launcher's
-PEP 723 header (through `green/tasks/pin.clj`), because a copied payload
-resolves ONCE from there, not from these manifests. `blue/pyproject.toml`
-carries a `[tool.uv] override-dependencies` block because `package-once-blue`
-pins an older Blue rev; the override makes this package's Blue pin win.
+Keep colors-compute's revision aligned in all three manifests/locks, the root
+Red manifest, Blue PEP723 payload metadata and `green/tasks/pin.clj`. ONCE is
+still pinned at `38e3cd66674a32fb96605e1b17ae6791086ad5c1` for application DNS
+backend credential mapping and utility helpers; it no longer owns compute or
+machine keys for this package. S3 credentials stay ambient. Preserve the DNS
+R2 credential mapping when changing ONCE helpers.
 
-Deployment launchers are copies of the skill payloads. Develop with
-`POSTHOG_LIB_ROOT` (the repository root, for every colour; red also accepts the
-`red/` dir directly), plus `GREEN_LIB_ROOT` and `ONCE_LIB_ROOT` for green;
-after pushing package code run `bb pin` (in `green/`), which stamps all three
-payloads from their unpinned birth forms, commit and push the stamped
-launchers, then synchronize the installed payloads and root copies. Never
-invent or hand-edit a SHA.
+Use `POSTHOG_LIB_ROOT` for repository development. Canonical `bb pin` in
+`green/` stamps the three launchers only after the source commit is pushed.
+Use a clean temporary worktree if unrelated untracked files prevent pinning;
+never fabricate a SHA or include those files merely to satisfy the guard.
+Then test the copied payloads, commit and push the stamps. Deployment
+launchers are copies, not symlinks. Avoid duplicate transitive Git package
+entries in Red's standalone PINS: Bun can fail before package loading.
 
 ## Documentation
 
