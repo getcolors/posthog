@@ -15,75 +15,25 @@
   (with-redefs [ansible/ansible-with-spec
                 (fn [& _] (throw (ex-info "playbook must not run" {})))]
     (let [r (tools/ansible-step (fixture :green/event :delete))]
-      (is (= 0 (:green/exit r)))
-      (is (= :skipped-no-compute (:posthog/cleanup r))))))
+      (is (= 1 (:green/exit r)))
+      (is (= "compute node unavailable" (:green/err r))))))
 
 (deftest delete-cleanup-targets-the-adopted-address
   ;; When the start step recovered the instance address from state, the
   ;; cleanup playbook runs against it, never the documentation fallback.
   (with-redefs [ansible/ansible-with-spec
                 (fn [opts _ _] (assoc opts :green/exit 0 ::ran-against (:ip opts)))]
-    (let [r (tools/ansible-step (fixture :green/event :delete :ip "203.0.113.7"))]
+    (let [r (tools/ansible-step (fixture :green/event :delete :ip "203.0.113.7" :user "root"))]
       (is (= "203.0.113.7" (::ran-against r))))))
-
-(deftest infrastructure-discovers-default-vpc
-  (let [data (tools/infrastructure-data (fixture))]
-    (is (= ["0.0.0.0/0" "::/0"] (tools/cidrs data :digitalocean-http-sources)))))
-
-(deftest template-directory-follows-the-provider
-  ;; Providers are selected by directory, never by conditionals in one file.
-  (is (= :io.github.getcolors.posthog.tools.infrastructure.digitalocean/main.tf
-         (tools/infrastructure-template (fixture))))
-  (is (= :io.github.getcolors.posthog.tools.infrastructure.vultr/main.tf
-         (tools/infrastructure-template (vultr)))))
-
-(deftest infrastructure-data-reads-the-selected-provider-sources
-  (let [data (tools/infrastructure-data (vultr))]
-    (is (= "[\"0.0.0.0/0\", \"::/0\"]" (:ssh-sources-hcl data)))
-    (is (true? (:ssh-keygen data)))
-    (is (= "posthog-vultr-fixture" (:compute-name data))))
-  (is (false? (:ssh-keygen (tools/infrastructure-data (vultr-optout)))))
-  ;; A DigitalOcean list is not read for a Vultr render.
-  (is (= "[]" (:ssh-sources-hcl (tools/infrastructure-data
-                                 (assoc (vultr) :vultr-ssh-sources []
-                                        :digitalocean-ssh-sources ["10.0.0.0/8"]))))))
 
 (deftest fallback-params-are-the-documentation-address-on-every-provider
   (doseq [f [fixture vultr]]
     (is (= {:provider (:provider-compute (f)) :ip "192.0.2.10" :user "root" :sudoer "root"
             :name (:profile (f))}
-           (tools/fallback-params (f)))))
+           (select-keys (tools/fallback-params (f)) [:provider :ip :user :sudoer :name]))))
   ;; `name` is the resolved compute name, as the templates' params output is.
   (is (= "analytics-1" (:name (tools/fallback-params (fixture :digitalocean-name "analytics-1")))))
   (is (= "posthog-optout" (:name (tools/fallback-params (optout))))))
-
-(deftest empty-http-sources-drop-the-public-rules
-  ;; An empty list is allowed and means no public HTTP; DigitalOcean rejects
-  ;; an inbound rule with no sources, so the two rules are left out rather
-  ;; than rendered empty. A non-empty list renders exactly as before.
-  (is (true? (:http-sources? (tools/infrastructure-data (fixture)))))
-  (let [data (tools/infrastructure-data (assoc (fixture) :digitalocean-http-sources []))]
-    (is (false? (:http-sources? data)))
-    (is (= "[]" (:http-sources-hcl data))))
-  (let [render (fn [opts] (sc/render-template (tools/infrastructure-template opts)
-                                              (tools/infrastructure-data opts)
-                                              tools/template-opts))
-        full (render (fixture))
-        none (render (assoc (fixture) :digitalocean-http-sources []))]
-    (is (= 3 (count (re-seq #"inbound_rule" full))))
-    (is (= 1 (count (re-seq #"inbound_rule" none))))
-    (is (str/includes? none "port_range       = \"22\""))
-    (is (not (str/includes? none "source_addresses = []")))
-    ;; The Vultr rules are a for_each over the set and vanish on their own.
-    (let [vultr-none (render (assoc (vultr) :vultr-http-sources []))]
-      (is (str/includes? vultr-none "http_sources = []"))
-      (is (str/includes? vultr-none "for_each          = toset(local.http_sources)")))))
-
-(deftest infrastructure-data-carries-the-ssh-mode-and-the-compute-name
-  (is (true? (:ssh-keygen (tools/infrastructure-data (fixture)))))
-  (is (false? (:ssh-keygen (tools/infrastructure-data (optout)))))
-  (is (= "posthog-fixture" (:compute-name (tools/infrastructure-data (fixture)))))
-  (is (= "posthog-optout" (:compute-name (tools/infrastructure-data (optout))))))
 
 (deftest ansible-stage-names-the-generated-key-in-keygen-mode
   ;; Remote Ansible must be able to use the generated key: nothing guarantees
@@ -103,7 +53,7 @@
       (is (= "ok" (tools/ssh-out {:ip "203.0.113.7" :ssh-keygen true
                                   :ssh-private-key-path "/home/x/.ssh/posthog-fixture"}
                                  "true" 1000)))
-      (is (= ["-o" "IdentitiesOnly=yes" "-i" "/home/x/.ssh/posthog-fixture"]
+      (is (= ["-i" "/home/x/.ssh/posthog-fixture" "-o" "IdentitiesOnly=yes"]
              (subvec @seen 5 9)))
       (is (= "root@203.0.113.7" (nth @seen 9)))
       (tools/ssh-out {:ip "203.0.113.7"} "true" 1000)
@@ -448,14 +398,6 @@
     (doseq [state ["bootstrapped" "joined" "rotated"]]
       (is (str/includes? owner (str "OWNER=" state))))))
 
-(deftest a-missing-compute-output-fails-loudly
-  ;; The documentation address belongs to build and dry-run. Merging it into a
-  ;; real converge would point Ansible at TEST-NET instead of failing.
-  (is (= "1.2.3.4" (:ip (tools/resolved-compute {} {:ip "192.0.2.10"} {:ip "1.2.3.4"}))))
-  (is (= 1 (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} nil))))
-  (is (= 1 (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} {}))))
-  (is (nil? (:green/exit (tools/resolved-compute {} {:ip "192.0.2.10"} {:ip "5.6.7.8"})))))
-
 (def caddyfile
   (delay (slurp "src/resources/io/github/getcolors/posthog/tools/ansible/Caddyfile")))
 
@@ -481,3 +423,10 @@
   (is (str/includes? @caddyfile "trusted_proxies static"))
   (is (str/includes? @caddyfile "162.158.0.0/15"))
   (is (str/includes? @caddyfile "2400:cb00::/32")))
+
+(deftest acceptance-uses-observed-login
+ (let [seen (atom nil)]
+  (with-redefs [process/run-with-timeout (fn [args _ _] (reset! seen args) {:exit 0 :out "ok"})]
+   (tools/ssh-out {:ip "203.0.113.7" :user "ubuntu" :ssh-private-key-path "/tmp/key"} "docker ps --format '{{.Names}}'" 1000)
+   (is (= "ubuntu@203.0.113.7" (nth @seen (- (count @seen) 2))))
+   (is (str/starts-with? (last @seen) "sudo -n -- sh -c ")))))

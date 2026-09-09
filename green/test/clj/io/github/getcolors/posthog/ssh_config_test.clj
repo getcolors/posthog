@@ -149,5 +149,5 @@
          (vec (rest (workflow/wire-fn :posthog/dns {:green/event :delete})))))
   (is (= [:posthog/infrastructure]
          (vec (rest (workflow/wire-fn :posthog/ssh-config {:green/event :delete})))))
-  (is (= [:posthog/ssh-cleanup]
+  (is (= []
          (vec (rest (workflow/wire-fn :posthog/infrastructure {:green/event :delete}))))))

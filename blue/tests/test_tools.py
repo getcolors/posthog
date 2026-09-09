@@ -31,8 +31,8 @@ async def test_delete_cleanup_skips_when_state_has_no_compute(monkeypatch):
     with tempfile.TemporaryDirectory() as workdir:
         r = await tools.ansible_step(make_fixture(**{"blue/event": "delete",
                                                      "workdir": workdir}))
-    assert r["blue/exit"] == 0
-    assert r["posthog/cleanup"] == "skipped-no-compute"
+    assert r["blue/exit"] == 1
+    assert r["blue/err"] == "compute node unavailable"
 
 
 async def test_delete_cleanup_targets_the_adopted_address(monkeypatch):
@@ -46,71 +46,18 @@ async def test_delete_cleanup_targets_the_adopted_address(monkeypatch):
     monkeypatch.setattr(runtime, "exec", record)
     with tempfile.TemporaryDirectory() as workdir:
         await tools.ansible_step(make_fixture(**{"blue/event": "delete",
-                                                 "ip": "203.0.113.7",
+                                                 "ip": "203.0.113.7", "user": "root",
                                                  "workdir": workdir}))
     assert "203.0.113.7" in seen["inventory"]
 
 
-def test_infrastructure_discovers_default_vpc():
-    data = tools.infrastructure_data(make_fixture())
-    assert tools.cidrs(data, "digitalocean-http-sources") == ["0.0.0.0/0", "::/0"]
-
-
-def test_template_directory_follows_the_provider():
-    # Providers are selected by directory, never by conditionals in one file.
-    assert tools.infrastructure_template(make_fixture())["name"] == "tools/infrastructure/digitalocean/main.tf"
-    assert tools.infrastructure_template(make_vultr())["name"] == "tools/infrastructure/vultr/main.tf"
-
-
-def test_infrastructure_data_reads_the_selected_provider_sources():
-    data = tools.infrastructure_data(make_vultr())
-    assert data["ssh-sources-hcl"] == '["0.0.0.0/0", "::/0"]'
-    assert data["ssh-keygen"] is True
-    assert data["compute-name"] == "posthog-vultr-fixture"
-    assert tools.infrastructure_data(make_vultr_optout())["ssh-keygen"] is False
-    # A DigitalOcean list is not read for a Vultr render.
-    assert tools.infrastructure_data(make_vultr(**{"vultr-ssh-sources": [],
-                                                   "digitalocean-ssh-sources": ["10.0.0.0/8"]}))["ssh-sources-hcl"] == "[]"
-
-
 def test_fallback_params_are_the_documentation_address_on_every_provider():
     for make in (make_fixture, make_vultr):
-        assert tools.fallback_params(make()) == {"provider": make()["provider-compute"], "ip": "192.0.2.10",
+        assert {k: tools.fallback_params(make())[k] for k in ["provider","ip","user","sudoer","name"]} == {"provider": make()["provider-compute"], "ip": "192.0.2.10",
                                                  "user": "root", "sudoer": "root", "name": make()["profile"]}
     # `name` is the resolved compute name, as the templates' params output is.
     assert tools.fallback_params(make_fixture(**{"digitalocean-name": "analytics-1"}))["name"] == "analytics-1"
     assert tools.fallback_params(make_optout())["name"] == "posthog-optout"
-
-
-def test_empty_http_sources_drop_the_public_rules():
-    # An empty list is allowed and means no public HTTP; DigitalOcean rejects
-    # an inbound rule with no sources, so the two rules are left out rather
-    # than rendered empty. A non-empty list renders exactly as before.
-    assert tools.infrastructure_data(make_fixture())["http-sources?"] is True
-    data = tools.infrastructure_data(make_fixture(**{"digitalocean-http-sources": []}))
-    assert data["http-sources?"] is False
-    assert data["http-sources-hcl"] == "[]"
-
-    def render(opts):
-        return render_template(tools.infrastructure_template(opts),
-                               tools.infrastructure_data(opts), tools.template_opts)
-    full = render(make_fixture())
-    none = render(make_fixture(**{"digitalocean-http-sources": []}))
-    assert len(re.findall(r"inbound_rule", full)) == 3
-    assert len(re.findall(r"inbound_rule", none)) == 1
-    assert 'port_range       = "22"' in none
-    assert "source_addresses = []" not in none
-    # The Vultr rules are a for_each over the set and vanish on their own.
-    vultr_none = render(make_vultr(**{"vultr-http-sources": []}))
-    assert "http_sources = []" in vultr_none
-    assert "for_each          = toset(local.http_sources)" in vultr_none
-
-
-def test_infrastructure_data_carries_the_ssh_mode_and_the_compute_name():
-    assert tools.infrastructure_data(make_fixture())["ssh-keygen"] is True
-    assert tools.infrastructure_data(make_optout())["ssh-keygen"] is False
-    assert tools.infrastructure_data(make_fixture())["compute-name"] == "posthog-fixture"
-    assert tools.infrastructure_data(make_optout())["compute-name"] == "posthog-optout"
 
 
 def test_ansible_stage_names_the_generated_key_in_keygen_mode():
@@ -136,7 +83,7 @@ async def test_acceptance_ssh_selects_the_generated_key(monkeypatch):
     assert await tools.ssh_out({"ip": "203.0.113.7", "ssh-keygen": True,
                                 "ssh-private-key-path": "/home/x/.ssh/posthog-fixture"},
                                "true", 1000) == "ok"
-    assert seen["cmd"][5:9] == ["-o", "IdentitiesOnly=yes", "-i", "/home/x/.ssh/posthog-fixture"]
+    assert seen["cmd"][5:9] == ["-i", "/home/x/.ssh/posthog-fixture", "-o", "IdentitiesOnly=yes"]
     assert seen["cmd"][9] == "root@203.0.113.7"
     await tools.ssh_out({"ip": "203.0.113.7"}, "true", 1000)
     assert seen["cmd"][5] == "root@203.0.113.7"
@@ -486,15 +433,6 @@ def test_an_owner_account_is_provisioned():
         assert f"OWNER={state}" in owner
 
 
-def test_a_missing_compute_output_fails_loudly():
-    # The documentation address belongs to build and dry-run. Merging it into a
-    # real converge would point Ansible at TEST-NET instead of failing.
-    assert tools.resolved_compute({}, {"ip": "192.0.2.10"}, {"ip": "1.2.3.4"})["ip"] == "1.2.3.4"
-    assert tools.resolved_compute({}, {"ip": "192.0.2.10"}, None)["blue/exit"] == 1
-    assert tools.resolved_compute({}, {"ip": "192.0.2.10"}, {})["blue/exit"] == 1
-    assert tools.resolved_compute({}, {"ip": "192.0.2.10"}, {"ip": "5.6.7.8"}).get("blue/exit") is None
-
-
 def test_caddy_access_logging_is_on_and_bounded():
     # Access logging is off by default in Caddy, so a successful request left no
     # trace and capture had no request-level evidence to debug from.
@@ -515,3 +453,13 @@ def test_access_log_records_the_visitor_not_the_proxy():
     assert "trusted_proxies static" in caddyfile
     assert "162.158.0.0/15" in caddyfile
     assert "2400:cb00::/32" in caddyfile
+
+async def test_acceptance_uses_observed_login_and_privilege_escalation(monkeypatch):
+    seen = {}
+    async def record(cmd, **kwargs):
+        seen['cmd'] = cmd
+        return ExecResult(exit=0, out='ok\n', err='')
+    monkeypatch.setattr(runtime,'exec',record)
+    assert await tools.ssh_out({'ip':'203.0.113.7','user':'ubuntu','ssh-private-key-path':'/tmp/key'},"docker ps --format '{{.Names}}'",1000) == 'ok'
+    assert seen['cmd'][-2] == 'ubuntu@203.0.113.7'
+    assert seen['cmd'][-1].startswith('sudo -n -- sh -c ')

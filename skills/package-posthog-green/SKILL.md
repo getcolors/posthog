@@ -1,6 +1,6 @@
 ---
 name: package-posthog-green
-description: Provisions and operates a single-node PostHog product analytics suite with PostgreSQL 17, ClickHouse, Redis 7.2, and Caddy on one DigitalOcean Droplet or Vultr instance.
+description: Provisions and operates a single-node PostHog product analytics suite with PostgreSQL 17, ClickHouse, Redis 7.2, and Caddy on one VM through the shared colors-compute library.
 license: MIT
 ---
 
@@ -10,16 +10,30 @@ Operate one PostHog deployment from non-secret `colors.yml`. Read
 [references/configuration.md](references/configuration.md) before changing
 configuration or running a lifecycle operation.
 
-## Compute providers
+## Compute ownership
 
-`provider-compute` selects `digitalocean` (the default; `COLORS_PAR_DO_TOKEN`,
-`digitalocean-region`, `-size`, `-image`, `-ssh-sources`, `-http-sources`) or
-`vultr` (`COLORS_PAR_VULTR_API_KEY`, `vultr-region`, `-plan`, `-os-id`,
-`-ssh-sources`, `-http-sources`). Keys of the unselected provider are ignored,
-so one `colors.yml` can carry both. Switching providers is a rebuild, never an
-apply: with a machine in state the package refuses both `create` and `delete`
-until `provider-compute` is set back to the recorded provider and the
-deployment deleted first.
+The pinned `colors-compute` library owns provider selection, remote S3/R2
+state, deployment coordination, machine keys, network policy and the single
+node. This package supplies singleton topology and SSH/HTTP ingress, then
+uses the returned address, login user and SSH identity for its application
+steps. New provider support belongs in the library; consumers update its pin.
+The application needs a supported Ubuntu image and sufficient memory for
+PostHog and its data services. Build first to check adapter capabilities.
+
+Use `posthog-ssh-sources` and `posthog-http-sources` for neutral CIDR
+allowlists. Existing selected-provider source options remain compatible.
+External account key references require `ssh-private-key-path`; external
+private keys are never generated or removed. The local SSH block writes
+`IdentityFile` only for a managed deployment key.
+
+Existing `<profile>/posthog-infrastructure.tfstate` is refused before
+compute mutation. Do not remove it to bypass this check: migrate ownership
+explicitly or destroy the old deployment through its original version first.
+Unreadable state and provider mismatches fail closed.
+
+The default compute provider remains `digitalocean`. An explicit `COLORS_PAR_IP`
+changes only the delete-cleanup target after a successful owned-state read;
+it cannot bypass unreadable state or provider identity checks.
 
 ## Safety
 
@@ -49,7 +63,8 @@ A key with no state, or a provider key named after the profile that this
 deployment's state does not own, stops the run: verify at the provider before
 removing anything, and never delete a key whose fingerprint is not yours.
 Rotation is a rebuild. Supplying `<provider>-ssh-keys` opts out and the
-package then touches no key material.
+library never generates or deletes external key material. Supply
+`ssh-private-key-path` explicitly.
 
 The machine is named after the profile; `<provider>-name` is an optional
 override, not a required key.

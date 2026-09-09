@@ -1,0 +1,140 @@
+{
+  "locals": {
+    "public_ingress": {
+      "http-443:0.0.0.0/0": {
+        "port_range": "443",
+        "protocol": "tcp",
+        "source_addresses": [
+          "0.0.0.0/0"
+        ]
+      },
+      "http-443:::/0": {
+        "port_range": "443",
+        "protocol": "tcp",
+        "source_addresses": [
+          "::/0"
+        ]
+      },
+      "http-80:0.0.0.0/0": {
+        "port_range": "80",
+        "protocol": "tcp",
+        "source_addresses": [
+          "0.0.0.0/0"
+        ]
+      },
+      "http-80:::/0": {
+        "port_range": "80",
+        "protocol": "tcp",
+        "source_addresses": [
+          "::/0"
+        ]
+      },
+      "ssh:0.0.0.0/0": {
+        "port_range": "22",
+        "protocol": "tcp",
+        "source_addresses": [
+          "0.0.0.0/0"
+        ]
+      },
+      "ssh:::/0": {
+        "port_range": "22",
+        "protocol": "tcp",
+        "source_addresses": [
+          "::/0"
+        ]
+      }
+    }
+  },
+  "output": {
+    "params": {
+      "value": {
+        "deployment_tag": "${digitalocean_tag.deployment.name}",
+        "endpoint_ip": "${try(digitalocean_reserved_ip.endpoint[0].ip_address, null)}",
+        "firewall_id": "${digitalocean_firewall.network.id}",
+        "provider": "digitalocean"
+      }
+    }
+  },
+  "provider": {
+    "digitalocean": {}
+  },
+  "resource": {
+    "digitalocean_firewall": {
+      "network": {
+        "dynamic": {
+          "inbound_rule": [
+            {
+              "content": {
+                "port_range": "${try(inbound_rule.value.port_range, null)}",
+                "protocol": "${inbound_rule.value.protocol}",
+                "source_addresses": "${inbound_rule.value.source_addresses}"
+              },
+              "for_each": "${local.public_ingress}"
+            }
+          ]
+        },
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "posthog-optout-firewall",
+        "outbound_rule": [
+          {
+            "destination_addresses": [
+              "0.0.0.0/0",
+              "::/0"
+            ],
+            "port_range": "1-65535",
+            "protocol": "tcp"
+          },
+          {
+            "destination_addresses": [
+              "0.0.0.0/0",
+              "::/0"
+            ],
+            "port_range": "1-65535",
+            "protocol": "udp"
+          },
+          {
+            "destination_addresses": [
+              "0.0.0.0/0",
+              "::/0"
+            ],
+            "protocol": "icmp"
+          }
+        ],
+        "tags": [
+          "${digitalocean_tag.deployment.name}"
+        ]
+      }
+    },
+    "digitalocean_reserved_ip": {
+      "endpoint": {
+        "count": 0,
+        "lifecycle": {
+          "ignore_changes": [
+            "droplet_id"
+          ],
+          "prevent_destroy": true
+        },
+        "region": "ams3"
+      }
+    },
+    "digitalocean_tag": {
+      "deployment": {
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "colors-compute-posthog-optout"
+      }
+    }
+  },
+  "terraform": {
+    "required_providers": {
+      "digitalocean": {
+        "source": "digitalocean/digitalocean",
+        "version": "2.51.0"
+      }
+    },
+    "required_version": ">= 1.8.0"
+  }
+}

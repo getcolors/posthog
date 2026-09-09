@@ -19,9 +19,10 @@
 
 (def blue-unpinned-meta "# dependencies = []\n# ///")
 (defn blue-pinned-meta [sha]
-  (str "# dependencies = [\"package-posthog-blue\", \"blue\", \"package-once-blue\"]\n"
+  (str "# dependencies = [\"package-posthog-blue\", \"blue\", \"package-once-blue\", \"colors-compute-blue\"]\n"
        "#\n"
        "# [tool.uv.sources]\n"
+       "# colors-compute-blue = { git = \"https://github.com/getcolors/colors-compute.git\", rev = \"422c3f39d22be93efa703da09eb192490942ede3\", subdirectory = \"blue\" }\n"
        "# package-posthog-blue = { git = \"https://github.com/getcolors/posthog.git\", rev = \"" sha "\", subdirectory = \"blue\" }\n"
        "# blue = { git = \"https://github.com/getcolors/blue.git\", rev = \"290f313ead5ca162875c33a049c880da017eae09\" }\n"
        "# package-once-blue = { git = \"https://github.com/getcolors/once.git\", subdirectory = \"blue\", rev = \"38e3cd66674a32fb96605e1b17ae6791086ad5c1\" }\n"

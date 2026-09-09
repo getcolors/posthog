@@ -7,7 +7,7 @@
             [green.scaffold :as sc]
             [green.tofu :as tofu]
             [green.workflow :as wf]
-            [io.github.getcolors.once.compute :as compute]
+            [io.github.getcolors.posthog.compute :as compute]
             [io.github.getcolors.posthog.ssh :as ssh]
             [io.github.getcolors.posthog.ssh-config :as ssh-config]
             [io.github.getcolors.posthog.utils :as utils]
@@ -25,8 +25,6 @@
 (defn spec [source target data] {:template source :target target :data data :opts template-opts})
 (defn raw-spec [target content] (sc/content-spec target content))
 
-(defn cidrs [opts k] (validate/cidrs opts k))
-
 (defn credential-env [opts & slots]
   (not-empty
    (into {} (keep (fn [[k env-var]]
@@ -35,50 +33,10 @@
 
 (defn backend-credential-env [opts] (credential-env opts))
 
-(def fallback-params
-  "What `build` and `--dry-run` render in place of a compute output: the
-   documentation address, shaped like the selected provider's real `params` so
-   every later stage sees the same keys either way. ONCE's."
-  compute/fallback-params)
-
-(defn infrastructure-data
-  "Template values for the compute stage. The source lists are read through
-   `compute-key`, so the same data serves every provider's template."
-  [opts]
-  (let [http-sources (cidrs opts (validate/compute-key opts "http-sources"))]
-    (assoc opts
-           :ssh-keygen (validate/keygen? opts)
-           :compute-name (validate/compute-name opts)
-           :ssh-sources-hcl (tofu/hcl-list (cidrs opts (validate/compute-key opts "ssh-sources")))
-           :http-sources-hcl (tofu/hcl-list http-sources)
-           ;; An empty http list means no public HTTP: the 80/443 rules are
-           ;; left out rather than rendered with an empty source list, which
-           ;; the DigitalOcean API rejects. Vultr's rules are a for_each over
-           ;; the set and vanish on their own.
-           :http-sources? (boolean (seq http-sources)))))
-
-(defn infrastructure-template
-  "Providers are selected by template directory, never by conditionals inside
-   one file (Compute Provider Standard §3): `tools/infrastructure/<provider>/`."
-  [opts]
-  (template (str "infrastructure." (:provider-compute opts)) "main.tf"))
-
-(def resolved-compute
-  "Refuse to hand 192.0.2.10 to Ansible on a real converge whose compute
-   output carries no `ip`. ONCE's; `infrastructure-step` is what wires it."
-  compute/resolved-compute)
-
-(defn infrastructure-step [opts]
-  (let [dir (tool-dir opts infrastructure-tool)
-        specs [(spec (infrastructure-template opts) (str dir "/main.tf")
-                     (infrastructure-data opts))]
-        result (tofu/tofu-with-spec opts specs
-                                    {:dir dir :env (credential-env opts :provider-compute)})]
-    (cond
-      (wf/failed? result) result
-      (= :build (:green/event opts)) (merge result (fallback-params opts))
-      (= :delete (:green/event opts)) result
-      :else (resolved-compute result (fallback-params opts) (compute/output-params result)))))
+(defn fallback-params [opts]
+ (when (and (#{:create :delete} (:green/event opts)) (not (:green/dry-run opts))) (throw (ex-info "compute node unavailable" {})))
+ (compute/node (compute/planned opts)))
+(def infrastructure-step compute/infrastructure-step)
 
 (defn zone-id [zone] (format "${data.cloudflare_zone.zone.id}" zone))
 
@@ -118,7 +76,7 @@
   Standard §6)."
   [opts]
   (assoc opts
-         :ssh-keygen (validate/keygen? opts)
+         :ssh-keygen (validate/keygen? opts) :ssh-identity-present (boolean (:ssh-private-key-path opts))
          :ssh-config-identity-file (ssh-config/identity-file opts)))
 
 (defn ansible-local-specs [opts]
@@ -147,8 +105,8 @@
 (defn inventory [opts]
   (json/generate-string
    {:all {:children {:posthog {:hosts {(:profile opts)
-                                        {:ansible_host (or (:ip opts) "192.0.2.10")
-                                         :ansible_user "root"}}}}}}
+                                        {:ansible_host (or (:ip opts) (:ip (fallback-params opts)))
+                                         :ansible_user (or (:user opts) (:user (fallback-params opts)))}}}}}}
    {:pretty true}))
 
 (defn ansible-data
@@ -157,8 +115,8 @@
   where nothing guarantees an agent holds it."
   [opts]
   (assoc opts
-         :ip (or (:ip opts) "192.0.2.10")
-         :ssh-keygen (validate/keygen? opts)
+         :ip (or (:ip opts) (:ip (fallback-params opts)))
+         :ssh-keygen (validate/keygen? opts) :ssh-identity-present (boolean (:ssh-private-key-path opts))
          :posthog-web-port (or (:posthog-web-port opts) 8000)
          :posthog-backup-access-key "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID') }}"
          :posthog-backup-secret-key "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY') }}"))
@@ -177,12 +135,8 @@
 
 (defn ansible-step [opts]
   (let [dir (tool-dir opts ansible-tool)]
-    (if (and (= :delete (:green/event opts)) (not (:ip opts)))
-      ;; No compute in state: there is no host to clean up, and the rendered
-      ;; inventory would fall back to 192.0.2.10. Remove the rendered tree the
-      ;; way a completed cleanup would and let the teardown continue.
-      (assoc (sc/scaffold opts (ansible-specs opts))
-             :green/exit 0 :posthog/cleanup :skipped-no-compute)
+    (if (and (#{:create :delete} (:green/event opts)) (not (:green/dry-run opts)) (not (:ip opts)))
+      (assoc opts :green/exit 1 :green/err "compute node unavailable")
       (ansible/ansible-with-spec opts
         {:dir dir :inventory "inventory.json"
          :playbooks {:create "main.yml" :delete "cleanup.yml"}
@@ -210,7 +164,7 @@
   (let [r (process/run-with-timeout
            (-> ["ssh" "-o" "StrictHostKeyChecking=no" "-o" "ConnectTimeout=10"]
                (into (ssh/identity-args opts))
-               (conj (str "root@" (:ip opts)) command))
+               (conj (str (or (:user opts) "root") "@" (:ip opts)) (if (= "root" (or (:user opts) "root")) command (str "sudo -n -- sh -c '" (str/replace command "'" "'\"'\"'") "'"))))
            {} timeout)]
     (when (zero? (:exit r)) (str/trim (:out r)))))
 

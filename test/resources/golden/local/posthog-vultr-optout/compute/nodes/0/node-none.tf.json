@@ -1,0 +1,45 @@
+{
+  "output": {
+    "params": {
+      "value": {
+        "ip": "${vultr_instance.node.main_ip}",
+        "name": "${vultr_instance.node.label}",
+        "node_id": "0",
+        "provider": "vultr",
+        "provider_id": "${vultr_instance.node.id}",
+        "ssh_key_id": "00000000-0000-0000-0000-000000000000",
+        "sudoer": "root",
+        "user": "root",
+        "vpc_ip": null
+      }
+    }
+  },
+  "provider": {
+    "vultr": {}
+  },
+  "resource": {
+    "vultr_instance": {
+      "node": {
+        "firewall_group_id": "00000000-0000-0000-0000-000000000001",
+        "label": "posthog-vultr-optout",
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "os_id": 2284,
+        "plan": "vc2-4c-8gb",
+        "region": "ams",
+        "ssh_key_ids": [
+          "00000000-0000-0000-0000-000000000000"
+        ]
+      }
+    }
+  },
+  "terraform": {
+    "required_providers": {
+      "vultr": {
+        "source": "vultr/vultr",
+        "version": "2.32.0"
+      }
+    }
+  }
+}

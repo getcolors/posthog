@@ -13,6 +13,7 @@
 
 profile: posthog-vultr-optout
 workdir: WORKDIR
+ssh-private-key-path: /home/build-placeholder/.ssh/operator-key
 
 provider-compute: vultr
 provider-dns: cloudflare

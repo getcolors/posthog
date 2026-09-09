@@ -9,6 +9,7 @@ import * as ssh from "../src/ssh.ts";
 import * as sshConfig from "../src/ssh-config.ts";
 import * as tools from "../src/tools.ts";
 import * as validate from "../src/validate.ts";
+import * as compute from "../src/compute.ts";
 import * as workflow from "../src/workflow.ts";
 
 const fixtureFile = resolve(import.meta.dir, "../../test/fixtures/colors.yml");
@@ -40,16 +41,6 @@ const secrets: Opts = {
   "posthog-backup-r2-secret-access-key": "s",
   "r2-access-key-id": "k", "r2-secret-access-key": "s",
 };
-
-// A stubbed `tofu output`: the recorded params, or a failed read. The failed
-// read is a non-zero exit, which `red/tofu` throws as the SDK's `StepError` —
-// the one shape ONCE's `readState` counts as an unreadable backend; anything
-// else propagates as a defect.
-function stateOutputs(params: Opts | undefined) {
-  runtime.exec = async () => params === undefined
-    ? { exit: 1, out: "", err: "Unauthorized" }
-    : { exit: 0, out: JSON.stringify({ params: { value: params } }), err: "" };
-}
 
 // ~/.ssh redirection: ONCE's ssh module and this package's ssh-config both
 // read $HOME at call time, exactly so tests can point them at a fresh
@@ -101,8 +92,8 @@ describe("tools", () => {
     // teardown must continue past it.
     runtime.exec = () => { throw new Error("playbook must not run"); };
     const r = await tools.ansibleStep(fixture({ "red/event": "delete", workdir: tempWorkdir() }));
-    expect(r["red/exit"]).toBe(0);
-    expect(r["posthog/cleanup"]).toBe("skipped-no-compute");
+    expect(r["red/exit"]).toBe(1);
+    expect(r["red/err"]).toBe("compute node unavailable");
   });
 
   test("delete cleanup targets the adopted address", async () => {
@@ -114,35 +105,14 @@ describe("tools", () => {
       inventoryDuringRun = readFileSync(join(String(options?.cwd), "inventory.json"), "utf8");
       return { exit: 0, out: "", err: "" };
     };
-    await tools.ansibleStep(fixture({ "red/event": "delete", ip: "203.0.113.7", workdir }));
+    await tools.ansibleStep(fixture({ "red/event": "delete", ip: "203.0.113.7", user:"root", workdir }));
     expect(inventoryDuringRun).toContain("203.0.113.7");
   });
 
-  test("infrastructure discovers default vpc", () => {
-    const data = tools.infrastructureData(fixture());
-    expect(tools.cidrs(data, "digitalocean-http-sources")).toEqual(["0.0.0.0/0", "::/0"]);
-  });
-
-  test("template directory follows the provider", () => {
-    // Providers are selected by directory, never by conditionals in one file.
-    expect(tools.infrastructureTemplate(fixture()).name).toBe("infrastructure/digitalocean/main.tf");
-    expect(tools.infrastructureTemplate(vultr()).name).toBe("infrastructure/vultr/main.tf");
-  });
-
-  test("infrastructure data reads the selected provider sources", () => {
-    const data = tools.infrastructureData(vultr());
-    expect(data["ssh-sources-hcl"]).toBe('["0.0.0.0/0", "::/0"]');
-    expect(data["ssh-keygen"]).toBe(true);
-    expect(data["compute-name"]).toBe("posthog-vultr-fixture");
-    expect(tools.infrastructureData(vultrOptout())["ssh-keygen"]).toBe(false);
-    // A DigitalOcean list is not read for a Vultr render.
-    expect(tools.infrastructureData(vultr({ "vultr-ssh-sources": [],
-      "digitalocean-ssh-sources": ["10.0.0.0/8"] }))["ssh-sources-hcl"]).toBe("[]");
-  });
 
   test("fallback params are the documentation address on every provider", () => {
     for (const f of [fixture, vultr]) {
-      expect(tools.fallbackParams(f())).toEqual({ provider: f()["provider-compute"], ip: "192.0.2.10",
+      expect(tools.fallbackParams(f())).toMatchObject({ provider: f()["provider-compute"], ip: "192.0.2.10",
         user: "root", sudoer: "root", name: f().profile });
     }
     // `name` is the resolved compute name, as the templates' params output is.
@@ -150,34 +120,6 @@ describe("tools", () => {
     expect(tools.fallbackParams(optout()).name).toBe("posthog-optout");
   });
 
-  test("empty http sources drop the public rules", () => {
-    // An empty list is allowed and means no public HTTP; DigitalOcean rejects
-    // an inbound rule with no sources, so the two rules are left out rather
-    // than rendered empty. A non-empty list renders exactly as before.
-    expect(tools.infrastructureData(fixture())["http-sources?"]).toBe(true);
-    const data = tools.infrastructureData(fixture({ "digitalocean-http-sources": [] }));
-    expect(data["http-sources?"]).toBe(false);
-    expect(data["http-sources-hcl"]).toBe("[]");
-    const render = (opts: Opts) => renderTemplate(tools.infrastructureTemplate(opts),
-      tools.infrastructureData(opts), tools.templateOpts);
-    const full = render(fixture());
-    const none = render(fixture({ "digitalocean-http-sources": [] }));
-    expect(full.match(/inbound_rule/g)?.length).toBe(3);
-    expect(none.match(/inbound_rule/g)?.length).toBe(1);
-    expect(none).toContain('port_range       = "22"');
-    expect(none).not.toContain("source_addresses = []");
-    // The Vultr rules are a for_each over the set and vanish on their own.
-    const vultrNone = render(vultr({ "vultr-http-sources": [] }));
-    expect(vultrNone).toContain("http_sources = []");
-    expect(vultrNone).toContain("for_each          = toset(local.http_sources)");
-  });
-
-  test("infrastructure data carries the ssh mode and the compute name", () => {
-    expect(tools.infrastructureData(fixture())["ssh-keygen"]).toBe(true);
-    expect(tools.infrastructureData(optout())["ssh-keygen"]).toBe(false);
-    expect(tools.infrastructureData(fixture())["compute-name"]).toBe("posthog-fixture");
-    expect(tools.infrastructureData(optout())["compute-name"]).toBe("posthog-optout");
-  });
 
   test("the ansible stage names the generated key in keygen mode", () => {
     // Remote Ansible must be able to use the generated key: nothing guarantees
@@ -197,7 +139,7 @@ describe("tools", () => {
     runtime.exec = async (cmd) => { seen = cmd; return { exit: 0, out: "ok\n", err: "" }; };
     expect(await tools.sshOut({ ip: "203.0.113.7", "ssh-keygen": true,
       "ssh-private-key-path": "/home/x/.ssh/posthog-fixture" }, "true", 1000)).toBe("ok");
-    expect(seen.slice(5, 9)).toEqual(["-o", "IdentitiesOnly=yes", "-i", "/home/x/.ssh/posthog-fixture"]);
+    expect(seen.slice(5, 9)).toEqual(["-i", "/home/x/.ssh/posthog-fixture", "-o", "IdentitiesOnly=yes"]);
     expect(seen[9]).toBe("root@203.0.113.7");
     await tools.sshOut({ ip: "203.0.113.7" }, "true", 1000);
     expect(seen[5]).toBe("root@203.0.113.7");
@@ -556,14 +498,6 @@ describe("tools", () => {
     }
   });
 
-  test("a missing compute output fails loudly", () => {
-    // The documentation address belongs to build and dry-run. Merging it into a
-    // real converge would point Ansible at TEST-NET instead of failing.
-    expect(tools.resolvedCompute({}, { ip: "192.0.2.10" }, { ip: "1.2.3.4" }).ip).toBe("1.2.3.4");
-    expect(tools.resolvedCompute({}, { ip: "192.0.2.10" }, undefined)["red/exit"]).toBe(1);
-    expect(tools.resolvedCompute({}, { ip: "192.0.2.10" }, {})["red/exit"]).toBe(1);
-    expect(tools.resolvedCompute({}, { ip: "192.0.2.10" }, { ip: "5.6.7.8" })["red/exit"]).toBeUndefined();
-  });
 
   test("caddy access logging is on and bounded", () => {
     // Access logging is off by default in Caddy, so a successful request left no
@@ -606,98 +540,9 @@ describe("validate", () => {
 
   // --- the registry (Compute Provider Standard §2)
 
-  test("advertised providers", () => {
-    expect(Object.keys(validate.computeProviders).sort()).toEqual(["digitalocean", "vultr"]);
-    expect(validate.defaultComputeProvider).toBe("digitalocean");
-  });
-
-  test("the spec carries this package's registry, sources and default", () => {
-    // The operations are ONCE's; this is the data they run over. A colour
-    // whose registry, sources or default drifts fails here, in that colour.
-    expect(Object.keys(validate.spec.registry).sort()).toEqual(["digitalocean", "vultr"]);
-    expect(validate.spec.registry).toBe(validate.computeProviders);
-    expect(validate.spec.registry.digitalocean).toEqual({
-      required: ["digitalocean-region", "digitalocean-size", "digitalocean-image",
-                 "digitalocean-ssh-sources", "digitalocean-http-sources"],
-      secrets: ["do-token"],
-      tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
-    });
-    expect(validate.spec.registry.vultr).toEqual({
-      required: ["vultr-region", "vultr-plan", "vultr-os-id", "vultr-ssh-sources", "vultr-http-sources"],
-      secrets: ["vultr-api-key"],
-      tofuEnv: { "vultr-api-key": "VULTR_API_KEY" },
-    });
-    expect(validate.spec.sources).toEqual({ nonEmpty: ["ssh-sources"], mayBeEmpty: ["http-sources"] });
-    expect(validate.spec.default).toBe("digitalocean");
-    expect(validate.spec.default).toBe(validate.defaultComputeProvider);
-    // The name rules are ONCE's.
-    expect(validate.spec.nameRules).toBeUndefined();
-  });
-
-  test("unsupported provider is named with the alternatives", () => {
-    expect(validate.stateErrors(fixture({ "provider-compute": "hcloud" })))
-      .toContain(":provider-compute must be one of digitalocean, vultr");
-  });
-
-  test("each provider requires its own keys and ignores the others", () => {
-    const vultrErrors = validate.stateErrors(fixture({ "provider-compute": "vultr" }));
-    for (const k of ["vultr-region", "vultr-plan", "vultr-os-id", "vultr-ssh-sources", "vultr-http-sources"]) {
-      expect(vultrErrors).toContain(`:${k} is required`);
-    }
-    expect(vultrErrors.some((e) => e.includes("digitalocean"))).toBe(false);
-    const doErrors = validate.stateErrors(vultr({ "provider-compute": "digitalocean" }));
-    for (const k of ["digitalocean-region", "digitalocean-size", "digitalocean-image",
-                     "digitalocean-ssh-sources", "digitalocean-http-sources"]) {
-      expect(doErrors).toContain(`:${k} is required`);
-    }
-    expect(doErrors.some((e) => e.includes("vultr"))).toBe(false);
-    // Unselected-provider keys are accepted so one colors.yml stays portable.
-    expect(validate.stateErrors(fixture({ "vultr-region": "ams", "vultr-ssh-keys": "x" }))).toEqual([]);
-  });
-
-  test("secrets and tofu env follow the selected provider", () => {
-    const doErrors = validate.secretErrors(fixture()).join("\n");
-    const vultrErrors = validate.secretErrors(vultr()).join("\n");
-    expect(doErrors).toContain("COLORS_PAR_DO_TOKEN");
-    expect(doErrors).not.toContain("VULTR_API_KEY");
-    expect(vultrErrors).toContain("COLORS_PAR_VULTR_API_KEY");
-    expect(vultrErrors).not.toContain("DO_TOKEN");
-    expect(validate.tofuEnv(fixture(), "provider-compute")).toEqual({ "do-token": "DIGITALOCEAN_TOKEN" });
-    expect(validate.tofuEnv(vultr(), "provider-compute")).toEqual({ "vultr-api-key": "VULTR_API_KEY" });
-    expect(validate.tofuEnv(fixture({ "provider-compute": "hcloud" }), "provider-compute")).toEqual({});
-  });
-
-  test("compute key is provider-scoped and keygen follows the selected provider key", () => {
-    expect(validate.computeKey(fixture(), "ssh-sources")).toBe("digitalocean-ssh-sources");
-    expect(validate.computeKey(vultr(), "name")).toBe("vultr-name");
-    expect(validate.keygen(vultr())).toBe(true);
-    expect(validate.keygen(vultrOptout())).toBe(false);
-    // A DigitalOcean key id in a Vultr deployment is an unselected key: ignored.
-    expect(validate.keygen(vultr({ "digitalocean-ssh-keys": "58495393" }))).toBe(true);
-    expect(validate.computeName(vultr())).toBe("posthog-vultr-fixture");
-    expect(validate.computeName(vultrOptout())).toBe("posthog-vultr-optout");
-    expect(validate.computeName(vultr({ "digitalocean-name": "other" }))).toBe("posthog-vultr-fixture");
-    expect(validate.stateErrors(vultr({ "vultr-name": "not valid!" })).some((e) => e.includes("vultr-name"))).toBe(true);
-  });
 
   // --- the network contract (§5)
 
-  test("ssh sources must reach someone and malformed entries are refused in either list", () => {
-    for (const f of [fixture, vultr]) {
-      const opts = f();
-      const sshKey = validate.computeKey(opts, "ssh-sources");
-      const httpKey = validate.computeKey(opts, "http-sources");
-      expect(validate.stateErrors({ ...opts, [sshKey]: [] })).toContain(`:${sshKey} must list at least one CIDR`);
-      expect(validate.stateErrors({ ...opts, [sshKey]: ["10.0.0.0"] }))
-        .toContain(`:${sshKey} entry "10.0.0.0" is not an IPv4 or IPv6 CIDR`);
-      expect(validate.stateErrors({ ...opts, [httpKey]: ["0.0.0.0/0", "nope"] }))
-        .toContain(`:${httpKey} entry "nope" is not an IPv4 or IPv6 CIDR`);
-      // An empty http list means no public HTTP and is allowed.
-      expect(validate.stateErrors({ ...opts, [httpKey]: [] })).toEqual([]);
-      // Overlay strings are split the way the template reads them.
-      expect(validate.stateErrors({ ...opts, [sshKey]: "10.0.0.0/8, 192.0.2.0/24" })).toEqual([]);
-    }
-  });
 
   test("the machine key is not required", () => {
     // The standard makes absence meaningful: requiring digitalocean-ssh-keys
@@ -710,18 +555,11 @@ describe("validate", () => {
     expect(validate.keygen(optout())).toBe(false);
   });
 
-  test("compute name defaults to the profile and honours the override", () => {
-    expect(validate.computeName(fixture())).toBe("posthog-fixture");
-    expect(validate.computeName(fixture({ "digitalocean-name": "" }))).toBe("posthog-fixture");
-    expect(validate.computeName(fixture({ "digitalocean-name": "REPLACE_ME" }))).toBe("posthog-fixture");
-    expect(validate.computeName(optout())).toBe("posthog-optout");
-    expect(validate.computeName(fixture({ "digitalocean-name": " analytics-1 " }))).toBe("analytics-1");
-  });
 
   test("compute name is not required but is validated", () => {
     expect(validate.stateErrors(fixture()).some((e) => e.includes("digitalocean-name"))).toBe(false);
     expect(validate.stateErrors(fixture({ "digitalocean-name": "not valid!" }))
-      .some((e) => e.includes("digitalocean-name"))).toBe(true);
+      .length).toBeGreaterThan(0);
   });
 
   test("reports all errors", () => {
@@ -729,35 +567,19 @@ describe("validate", () => {
       fixture({ "posthog-host": "bad", "posthog-image": "floating",
         "posthog-backup-retention-days": -1,
         "provider-dns": "other", "digitalocean-vpc-uuid": "forbidden" }));
-    expect(errors.length).toBeGreaterThanOrEqual(5);
-    for (const part of ["host", "image", "retention", "provider-dns", "vpc-uuid"]) {
+    expect(errors.length).toBeGreaterThanOrEqual(4);
+    for (const part of ["host", "image", "retention", "provider-dns"]) {
       expect(errors.some((e) => e.includes(part))).toBe(true);
     }
   });
 
-  test("forbids vpc configuration", () => {
-    expect(validate.stateErrors(fixture({ "digitalocean-vpc-cidr": "10.0.0.0/16" }))
-      .some((e) => e.includes("must be absent"))).toBe(true);
-  });
 
   test("profile overlay is refused", () => {
     expect(validate.envErrors({ COLORS_PAR_PROFILE: "other" }).length).toBeGreaterThan(0);
     expect(validate.envErrors({})).toEqual([]);
   });
 
-  test("names all package secrets", () => {
-    const errors = validate.secretErrors(fixture()).join("\n");
-    for (const name of ["COLORS_PAR_DO_TOKEN", "COLORS_PAR_CLOUDFLARE_API_TOKEN",
-      "COLORS_PAR_R2_ACCESS_KEY_ID", "COLORS_PAR_R2_SECRET_ACCESS_KEY",
-      "COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID",
-      "COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY",
-      "COLORS_PAR_POSTHOG_SECRET_KEY",
-      "COLORS_PAR_POSTHOG_POSTGRES_PASSWORD",
-      "COLORS_PAR_POSTHOG_OIDC_RSA_PRIVATE_KEY",
-      "COLORS_PAR_POSTHOG_ENCRYPTION_SALT_KEYS"]) {
-      expect(errors).toContain(name);
-    }
-  });
+
 });
 
 // --- workflow ----------------------------------------------------------------
@@ -777,472 +599,6 @@ function deletableFixture(overrides: Opts = {}): Opts {
     ...overrides,
   });
 }
-
-describe("workflow", () => {
-  test("build and dry-run need no credentials", async () => {
-    expect((await workflow.startStep(fixture({ "red/event": "build" }), {}))["red/exit"]).toBe(0);
-    expect((await workflow.startStep(
-      fixture({ "red/event": "create", "red/dry-run": true }), {}))["red/exit"]).toBe(0);
-  });
-
-  test("real create requires credentials", async () => {
-    const r = await workflow.startStep(fixture({ "red/event": "create" }), {});
-    expect(r["red/exit"]).toBe(2);
-    expect(String(r["red/err"])).toContain("COLORS_PAR_DO_TOKEN");
-    expect(String(r["red/err"])).toContain("COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY");
-  });
-
-  test("a real create on a fresh work directory reports the credentials, not a crash", async () => {
-    // A fresh clone has no stage directory at all, so the one state read runs
-    // `tofu output` somewhere that does not exist. The SDK reports that as a
-    // StepError, which ONCE's `readState` counts as an unreadable backend —
-    // no state on a create — so the run reaches the validators and names the
-    // missing credentials. Nothing is stubbed here on purpose; this is the
-    // path a first `create` takes.
-    const r = await workflow.startStep(fixture({ "red/event": "create", workdir: tempWorkdir() }), {});
-    expect(r["red/exit"]).toBe(2);
-    expect(String(r["red/err"])).toContain("COLORS_PAR_DO_TOKEN");
-    expect(String(r["red/err"])).not.toContain("could not read");
-  });
-
-  test("delete is protected", async () => {
-    const r = await workflow.startStep(fixture({ "red/event": "delete" }), {});
-    expect(r["red/exit"]).toBe(2);
-    expect(String(r["red/err"])).toContain("COMPUTE_PREVENT_DESTROY");
-  });
-
-  test("delete fails loudly when state is unreadable", async () => {
-    // Swallowing a failed state read is how a live teardown ended up pointing
-    // the cleanup playbook at 192.0.2.10: stale backend credentials made
-    // `tofu output` fail, nil was merged, and the inventory fell back to
-    // TEST-NET. The failure must surface here, before any playbook runs.
-    runtime.exec = async () => ({ exit: 1, out: "", err: "Unauthorized" });
-    const r = await workflow.startStep(deletableFixture({ "red/event": "delete" }), {});
-    expect(r["red/exit"]).toBe(1);
-    expect(String(r["red/err"])).toContain("Unauthorized");
-    expect(String(r["red/err"])).toContain("could not read the infrastructure state for the delete cleanup");
-  });
-
-  test("an explicit ip never skips the read or the provider guard", async () => {
-    // COLORS_PAR_IP replaces a stale recorded address once the read succeeded;
-    // it is not a way around the read, the fail-closed rule, or the provider
-    // guard (Compute Provider Standard §4).
-    stateOutputs(undefined);
-    let r = await workflow.startStep(deletableFixture({ "red/event": "delete", ip: "203.0.113.7" }), {});
-    expect(r["red/exit"]).toBe(1);
-    expect(String(r["red/err"])).toContain("Unauthorized");
-    stateOutputs({ provider: "vultr", ip: "198.51.100.4" });
-    r = await workflow.startStep(deletableFixture({ "red/event": "delete", ip: "203.0.113.7" }), {});
-    expect(r["red/exit"]).toBe(2);
-    expect(String(r["red/err"])).toContain("state holds a vultr machine");
-    stateOutputs({ provider: "digitalocean", ip: "198.51.100.4" });
-    r = await workflow.startStep(deletableFixture({ "red/event": "delete", ip: "203.0.113.7" }), {});
-    expect(r["red/exit"]).toBe(0);
-    expect(r.ip).toBe("203.0.113.7");
-  });
-
-  test("state is read once per run", async () => {
-    // One read serves the provider validator, the key matrix and the
-    // adoption; a second read would be a second chance for the backend to
-    // disagree.
-    const ensure = spyOn(ssh, "ensureKey").mockImplementation(async (opts, stateFn) =>
-      ({ ...opts, recorded: await stateFn(opts) }));
-    const preflight = spyOn(ssh, "preflight").mockImplementation(async (opts) => opts);
-    const config = spyOn(sshConfig, "preflight").mockImplementation((opts) => opts);
-    try {
-      for (const event of ["create", "delete"]) {
-        let reads = 0;
-        runtime.exec = async () => {
-          reads += 1;
-          return { exit: 0, out: JSON.stringify({ params: { value: { provider: "digitalocean", ip: "203.0.113.9" } } }), err: "" };
-        };
-        const r = await workflow.startStep(deletableFixture({ "red/event": event,
-          "compute-prevent-destroy": event === "create" }), {});
-        expect(r["red/exit"]).toBe(0);
-        expect(reads).toBe(1);
-        if (event === "create") expect((r.recorded as Opts).ip).toBe("203.0.113.9");
-        else expect(r.ip).toBe("203.0.113.9");
-      }
-    } finally {
-      ensure.mockRestore(); preflight.mockRestore(); config.mockRestore();
-    }
-  });
-
-  test("delete with empty state proceeds without an address", async () => {
-    // State readable, no compute recorded: the instance is already gone, the
-    // cleanup step skips itself, and the rest of the teardown still runs.
-    runtime.exec = async () => ({ exit: 0, out: "{}", err: "" });
-    const r = await workflow.startStep(deletableFixture({ "red/event": "delete" }), {});
-    expect(r["red/exit"]).toBe(0);
-    expect(r.ip).toBeUndefined();
-  });
-
-  test("a provider switch is refused on create and delete, before the missing token", async () => {
-    // Compute Provider Standard §4: all providers share one state key, so a
-    // changed provider-compute on a profile with compute in state would plan a
-    // cross-provider replacement. Both events refuse; delete refuses because it
-    // would render and destroy the *selected* provider's template. The
-    // validator order is the thing under test: no missing-token entry for the
-    // newly selected provider appears beside the actionable error.
-    stateOutputs({ provider: "digitalocean", ip: "203.0.113.7" });
-    for (const event of ["create", "delete"]) {
-      const { "vultr-api-key": _dropped, ...withoutToken } = secrets;
-      const r = await workflow.startStep(vultr({ ...withoutToken, "red/event": event,
-        "compute-prevent-destroy": false }), {});
-      expect(r["red/exit"]).toBe(2);
-      const lines = String(r["red/err"]).split("\n");
-      expect(lines).toContain("state holds a digitalocean machine; set provider-compute back to digitalocean and delete first");
-      expect(lines.some((l) => l.includes("COLORS_PAR_VULTR_API_KEY"))).toBe(false);
-    }
-    stateOutputs({ provider: "vultr", ip: "203.0.113.7" });
-    for (const event of ["create", "delete"]) {
-      const r = await workflow.startStep(fixture({ ...secrets, "red/event": event,
-        "compute-prevent-destroy": false }), {});
-      expect(String(r["red/err"])).toContain("state holds a vultr machine; set provider-compute back to vultr and delete first");
-    }
-  });
-
-  test("legacy state without a provider accepts only the default", async () => {
-    stateOutputs({ ip: "203.0.113.7" });
-    const ensure = spyOn(ssh, "ensureKey").mockImplementation(async (opts) => opts);
-    const preflight = spyOn(ssh, "preflight").mockImplementation(async (opts) => opts);
-    const config = spyOn(sshConfig, "preflight").mockImplementation((opts) => opts);
-    try {
-      for (const event of ["create", "delete"]) {
-        const ok = await workflow.startStep(fixture({ ...secrets, "red/event": event,
-          "compute-prevent-destroy": false }), {});
-        expect(ok["red/exit"]).toBe(0);
-        const refused = await workflow.startStep(vultr({ ...secrets, "red/event": event,
-          "compute-prevent-destroy": false }), {});
-        expect(refused["red/exit"]).toBe(2);
-        expect(String(refused["red/err"])).toContain("set provider-compute back to digitalocean");
-      }
-    } finally {
-      ensure.mockRestore(); preflight.mockRestore(); config.mockRestore();
-    }
-  });
-
-  test("an unreadable backend is no state on create and fatal on delete", async () => {
-    stateOutputs(undefined);
-    let seen: Opts | undefined | null = null;
-    const ensure = spyOn(ssh, "ensureKey").mockImplementation(async (opts, stateFn) => {
-      seen = await stateFn(opts);
-      return opts;
-    });
-    const preflight = spyOn(ssh, "preflight").mockImplementation(async (opts) => opts);
-    const config = spyOn(sshConfig, "preflight").mockImplementation((opts) => opts);
-    try {
-      for (const f of [fixture, vultr]) {
-        const created = await workflow.startStep(f({ ...secrets, "red/event": "create" }), {});
-        expect(created["red/exit"]).toBe(0);
-        expect(seen).toBeUndefined();
-        const deleted = await workflow.startStep(f({ ...secrets, "red/event": "delete",
-          "compute-prevent-destroy": false }), {});
-        expect(deleted["red/exit"]).toBe(1);
-        expect(String(deleted["red/err"])).toContain("could not read the infrastructure state for the delete cleanup");
-        expect(String(deleted["red/err"])).toContain("Unauthorized");
-      }
-    } finally {
-      ensure.mockRestore(); preflight.mockRestore(); config.mockRestore();
-    }
-  });
-
-  test("a real create requires the selected provider credentials", async () => {
-    const r = await workflow.startStep(vultr({ "red/event": "create" }), {});
-    expect(r["red/exit"]).toBe(2);
-    expect(String(r["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
-    expect(String(r["red/err"])).not.toContain("COLORS_PAR_DO_TOKEN");
-  });
-
-  test("graph orders private stack", () => {
-    const next = (step: string) =>
-      (workflow.wireFn(step, { "red/event": "create" }) ?? []).slice(1);
-    expect(next("posthog/start")).toEqual(["posthog/infrastructure"]);
-    expect(next("posthog/infrastructure")).toEqual(["posthog/ssh-config"]);
-    expect(next("posthog/ssh-config")).toEqual(["posthog/dns"]);
-    expect(next("posthog/dns")).toEqual(["posthog/ansible"]);
-    expect(next("posthog/ansible")).toEqual(["posthog/acceptance"]);
-    expect((workflow.wireFn("posthog/start", { "red/event": "delete" }) ?? []).slice(1))
-      .toEqual(["posthog/ansible"]);
-  });
-
-  test("delete removes the config block before the destroy and the key after it", () => {
-    // The ordering is what makes "key present ⇔ deployment exists" hold: a
-    // failed destroy never reaches the cleanup step, and correctly leaves the
-    // key that is still the only credential to whatever survived.
-    const next = (step: string) =>
-      (workflow.wireFn(step, { "red/event": "delete" }) ?? []).slice(1);
-    expect(next("posthog/ansible")).toEqual(["posthog/dns"]);
-    expect(next("posthog/dns")).toEqual(["posthog/ssh-config"]);
-    expect(next("posthog/ssh-config")).toEqual(["posthog/infrastructure"]);
-    expect(next("posthog/infrastructure")).toEqual(["posthog/ssh-cleanup"]);
-    expect(next("posthog/ssh-cleanup")).toEqual([]);
-  });
-
-  test("build and dry-run never touch ~/.ssh", async () => {
-    // The standard forbids reading, creating, or requiring anything under
-    // ~/.ssh on a build or dry-run: they render from desired state alone.
-    // A poisoned config proves nothing in the build path reads it.
-    write(join(home, ".ssh", "config"), "ServerAliveInterval 60\nHost posthog-fixture\n");
-    runtime.exec = () => { throw new Error("ssh-keygen must not run"); };
-    for (const overrides of [{ "red/event": "build" },
-                             { "red/event": "create", "red/dry-run": true },
-                             { "red/event": "delete", "red/dry-run": true }]) {
-      const result = await workflow.startStep(fixture(overrides), {});
-      expect(result["red/exit"]).toBe(0);
-      expect(String(result["ssh-public-key-path"])).toStartWith("/home/build-placeholder");
-      expect(result["digitalocean-ssh-keys"]).toBe(result["ssh-public-key-path"]);
-    }
-  });
-
-  test("opt-out renders the historical shape on every rendered event", async () => {
-    for (const overrides of [{ "red/event": "build" },
-                             { "red/event": "create", "red/dry-run": true }]) {
-      const result = await workflow.startStep(optout(overrides), {});
-      expect(result["red/exit"]).toBe(0);
-      expect(result["digitalocean-ssh-keys"]).toBe("58495393");
-      expect(result["ssh-keygen"]).toBeUndefined();
-    }
-  });
-
-  test("a real delete fills the real key paths and adopts state", async () => {
-    // The transition table's last row: a destroy renders before it destroys,
-    // so the template values are the real ones, merged with the adopted state.
-    runtime.exec = async () => ({ exit: 0, out: JSON.stringify({
-      params: { value: { ip: "203.0.113.9", ssh_key_id: "77" } } }), err: "" });
-    const r = await workflow.startStep(deletableFixture({ "red/event": "delete" }), {});
-    expect(r["red/exit"]).toBe(0);
-    expect(r.ip).toBe("203.0.113.9");
-    expect(r["ssh-private-key-path"]).toBe(join(home, ".ssh", "posthog-fixture"));
-    expect(r["ssh-keygen"]).toBe(true);
-  });
-
-  test("a real create runs the key matrix then both preflights", async () => {
-    // Row three of the transition table, in order: ensureKey against the
-    // best-effort state read, the provider preflight, then the ~/.ssh/config
-    // checks. Each stops the run on its own error.
-    const creatable = (overrides: Opts = {}) =>
-      deletableFixture({ "compute-prevent-destroy": true, ...overrides });
-    const context = { event: "create", real: true };
-    const state = {};
-    const calls: unknown[] = [];
-    const ensure = spyOn(ssh, "ensureKey").mockImplementation(async (opts, stateFn) => {
-      calls.push(["ensure", await stateFn(opts)]);
-      return opts;
-    });
-    void runtime;
-    const preflight = spyOn(ssh, "preflight").mockImplementation(async (opts) => {
-      calls.push("preflight");
-      return opts;
-    });
-    const config = spyOn(sshConfig, "preflight").mockImplementation((opts) => {
-      calls.push("ssh-config");
-      return opts;
-    });
-    try {
-      // All pass; the key matrix is handed the one state read's params.
-      let r = await workflow.afterValidate(creatable({ "red/event": "create" }), context, { params: undefined });
-      expect(r["red/exit"]).toBe(0);
-      expect(calls).toEqual([["ensure", undefined], "preflight", "ssh-config"]);
-      expect(r["ssh-keygen"]).toBe(true);
-      // The key matrix stops the run.
-      ensure.mockImplementation(async (opts) => ({ ...opts, "red/exit": 1, "red/err": "half a keypair" }));
-      preflight.mockImplementation(async () => { throw new Error("must not run"); });
-      r = await workflow.afterValidate(creatable({ "red/event": "create" }), context, state);
-      expect(r["red/exit"]).toBe(1);
-      expect(String(r["red/err"])).toContain("half a keypair");
-      // The provider preflight stops the run.
-      ensure.mockImplementation(async (opts) => opts);
-      preflight.mockImplementation(async (opts) => ({ ...opts, "red/exit": 1, "red/err": "already has an SSH key" }));
-      config.mockImplementation(() => { throw new Error("must not run"); });
-      r = await workflow.afterValidate(creatable({ "red/event": "create" }), context, state);
-      expect(r["red/exit"]).toBe(1);
-      expect(String(r["red/err"])).toContain("already has an SSH key");
-      // The ~/.ssh/config checks stop the run.
-      preflight.mockImplementation(async (opts) => opts);
-      config.mockImplementation((opts) => ({ ...opts, "red/exit": 1, "red/err": "refusing to manage" }));
-      r = await workflow.afterValidate(creatable({ "red/event": "create" }), context, state);
-      expect(r["red/exit"]).toBe(1);
-      expect(String(r["red/err"])).toContain("refusing to manage");
-    } finally {
-      ensure.mockRestore();
-      preflight.mockRestore();
-      config.mockRestore();
-    }
-  });
-
-  test("opt-out create skips the key matrix", async () => {
-    // Presence of the explicit key is the only switch: the package then
-    // generates, validates and deletes nothing.
-    runtime.exec = () => { throw new Error("ssh-keygen must not run"); };
-    const r = await workflow.afterValidate(
-      { ...deletableFixture({ "compute-prevent-destroy": true }), ...optout({ "red/event": "create" }) },
-      { event: "create", real: true }, {});
-    expect(r["red/exit"]).toBe(0);
-    expect(r["digitalocean-ssh-keys"]).toBe("58495393");
-    expect(existsSync(join(home, ".ssh"))).toBe(false);
-  });
-});
-
-// --- ssh keypair (SSH Keypair Standard) --------------------------------------
-
-describe("ssh", () => {
-  test("build renders a stable placeholder path", () => {
-    const opts = ssh.withMachineKey(fixture({ "red/event": "build" }));
-    expect(String(opts["ssh-public-key-path"])).toStartWith(ssh.buildPlaceholderDir);
-    expect(opts["digitalocean-ssh-keys"]).toBe(opts["ssh-public-key-path"]);
-    expect(String(opts["ssh-private-key-path"])).not.toContain(home);
-  });
-
-  test("a dry-run renders the placeholder too", () => {
-    const opts = ssh.withMachineKey(fixture({ "red/event": "create", "red/dry-run": true }));
-    expect(String(opts["ssh-public-key-path"])).toStartWith(ssh.buildPlaceholderDir);
-  });
-
-  test("real events render the real path", () => {
-    const opts = ssh.withMachineKey(fixture({ "red/event": "create" }));
-    expect(opts["ssh-private-key-path"]).toBe(join(home, ".ssh", "posthog-fixture"));
-    expect(opts["ssh-public-key-path"]).toBe(join(home, ".ssh", "posthog-fixture.pub"));
-  });
-
-  test("opt-out passes through untouched", () => {
-    for (const event of ["build", "create", "delete"]) {
-      const opts = ssh.withMachineKey(optout({ "red/event": event }));
-      expect(opts["digitalocean-ssh-keys"]).toBe("58495393");
-      expect(opts["ssh-public-key-path"]).toBeUndefined();
-      expect(opts["ssh-keygen"]).toBeUndefined();
-    }
-  });
-
-  test("the placeholder lands on the selected provider key", () => {
-    const opts = ssh.withMachineKey(vultr({ "red/event": "build" }));
-    expect(opts["vultr-ssh-keys"]).toBe(opts["ssh-public-key-path"]);
-    expect(opts["digitalocean-ssh-keys"]).toBeUndefined();
-    const out = ssh.withMachineKey(vultrOptout({ "red/event": "build" }));
-    expect(out["vultr-ssh-keys"]).toBe("00000000-0000-0000-0000-000000000000");
-    expect(out["ssh-keygen"]).toBeUndefined();
-  });
-
-  test("the preflight uses the selected provider token", async () => {
-    // do-token on DigitalOcean, vultr-api-key on Vultr — the delegation is
-    // what is tested; ONCE owns the table.
-    const seen: string[][] = [];
-    const fetchFn = async (provider: string, token: string) => { seen.push([provider, token]); return []; };
-    await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create", "do-token": "do-t", "vultr-api-key": "v-t" })), fetchFn);
-    await ssh.preflight(ssh.withMachineKey(vultr({ "red/event": "create", "do-token": "do-t", "vultr-api-key": "v-t" })), fetchFn);
-    expect(seen).toEqual([["digitalocean", "do-t"], ["vultr", "v-t"]]);
-  });
-
-  test("first create generates the keypair", async () => {
-    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }), async () => undefined);
-    const prv = join(home, ".ssh", "posthog-fixture");
-    const pub = `${prv}.pub`;
-    expect(opts["red/err"]).toBeUndefined();
-    expect(existsSync(prv)).toBe(true);
-    expect(existsSync(pub)).toBe(true);
-    // ed25519, no passphrase, profile-named comment
-    expect(readFileSync(pub, "utf8")).toContain("ssh-ed25519");
-    expect(readFileSync(pub, "utf8")).toContain("posthog-fixture managed by Colors");
-    // 600 on the private key, 700 on ~/.ssh
-    expect(statSync(prv).mode & 0o777).toBe(0o600);
-    expect(statSync(join(home, ".ssh")).mode & 0o777).toBe(0o700);
-  });
-
-  test("converge reuses an existing key", async () => {
-    write(join(home, ".ssh", "posthog-fixture"), "private");
-    write(join(home, ".ssh", "posthog-fixture.pub"), "ssh-ed25519 AAAA test");
-    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }),
-      async () => ({ ip: "192.0.2.10" }));
-    expect(opts["red/err"]).toBeUndefined();
-    expect(readFileSync(join(home, ".ssh", "posthog-fixture"), "utf8")).toBe("private");
-  });
-
-  test("state without a key is an error", async () => {
-    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }),
-      async () => ({ ip: "192.0.2.10" }));
-    expect(opts["red/exit"]).toBe(1);
-    expect(String(opts["red/err"])).toContain("does not hold the machine key");
-    expect(String(opts["red/err"])).toContain("rebuild");
-  });
-
-  test("a key without state is never overwritten", async () => {
-    const prv = join(home, ".ssh", "posthog-fixture");
-    write(prv, "irreplaceable");
-    write(`${prv}.pub`, "ssh-ed25519 AAAA test");
-    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }), async () => undefined);
-    expect(opts["red/exit"]).toBe(1);
-    expect(String(opts["red/err"])).toContain("no compute state is readable");
-    expect(String(opts["red/err"])).toContain("survives");
-    expect(readFileSync(prv, "utf8")).toBe("irreplaceable");
-  });
-
-  test("half a keypair is an error", async () => {
-    write(join(home, ".ssh", "posthog-fixture"), "private");
-    const opts = await ssh.ensureKey(fixture({ "red/event": "create" }), async () => undefined);
-    expect(opts["red/exit"]).toBe(1);
-    expect(String(opts["red/err"])).toContain("half a keypair");
-  });
-
-  test("opt-out generates nothing", async () => {
-    const opts = await ssh.ensureKey(optout({ "red/event": "create" }), async () => undefined);
-    expect(opts["red/err"]).toBeUndefined();
-    expect(existsSync(join(home, ".ssh"))).toBe(false);
-  });
-
-  test("preflight passes when no account key matches, or when it is ours", async () => {
-    const clean = await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create" })),
-      async () => [{ id: "1", name: "someone-else", public: "ssh-ed25519 BBBB" }]);
-    expect(clean["red/err"]).toBeUndefined();
-    const owned = await ssh.preflight(
-      ssh.withMachineKey(fixture({ "red/event": "create",
-        "once/ssh-state-params": { ssh_key_id: "abc" } })),
-      async () => [{ id: "abc", name: "posthog-fixture", public: "ssh-ed25519 AAAA" }]);
-    expect(owned["red/err"]).toBeUndefined();
-  });
-
-  test("preflight refuses our leftover key", async () => {
-    write(join(home, ".ssh", "posthog-fixture.pub"), "ssh-ed25519 AAAA comment");
-    const opts = await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create" })),
-      async () => [{ id: "abc", name: "posthog-fixture", public: "ssh-ed25519 AAAA" }]);
-    expect(opts["red/exit"]).toBe(1);
-    expect(String(opts["red/err"])).toContain("previous delete");
-    expect(String(opts["red/err"])).toContain("delete that key");
-  });
-
-  test("preflight refuses a foreign key and says do not delete it", async () => {
-    write(join(home, ".ssh", "posthog-fixture.pub"), "ssh-ed25519 OURS comment");
-    const opts = await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create" })),
-      async () => [{ id: "abc", name: "posthog-fixture", public: "ssh-ed25519 THEIRS" }]);
-    expect(opts["red/exit"]).toBe(1);
-    expect(String(opts["red/err"])).toContain("Do not delete it");
-  });
-
-  test("preflight failure is an error, not a skip", async () => {
-    const opts = await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create" })),
-      async () => { throw new Error("HTTP 500"); });
-    expect(opts["red/exit"]).toBe(1);
-    expect(String(opts["red/err"])).toContain("cannot list");
-  });
-
-  test("delete removes the keypair; ~/.ssh itself survives", () => {
-    write(join(home, ".ssh", "posthog-fixture"), "private");
-    write(join(home, ".ssh", "posthog-fixture.pub"), "public");
-    ssh.cleanupStep(fixture({ "red/event": "delete", "ssh-keygen": true }));
-    expect(existsSync(join(home, ".ssh", "posthog-fixture"))).toBe(false);
-    expect(existsSync(join(home, ".ssh", "posthog-fixture.pub"))).toBe(false);
-    expect(existsSync(join(home, ".ssh"))).toBe(true);
-  });
-
-  test("cleanup is inert on create and in opt-out mode", () => {
-    write(join(home, ".ssh", "posthog-fixture"), "private");
-    ssh.cleanupStep(fixture({ "red/event": "create", "ssh-keygen": true }));
-    expect(existsSync(join(home, ".ssh", "posthog-fixture"))).toBe(true);
-    ssh.cleanupStep(optout({ "red/event": "delete" }));
-    expect(existsSync(join(home, ".ssh", "posthog-fixture"))).toBe(true);
-  });
-});
-
-// --- ~/.ssh/config (SSH Config Standard) -------------------------------------
 
 describe("ssh-config", () => {
   test("the alias is the profile and the identity file keeps the tilde", () => {
@@ -1329,4 +685,48 @@ describe("ssh-config", () => {
     }
     expect(targets.every((t) => t.includes("posthog-ansible-local"))).toBe(true);
   });
+});
+describe("library compute", () => {
+  test("all fixtures validate and use one library node", () => {
+    for(const f of [fixture,optout,vultr,vultrOptout]) expect(validate.stateErrors(f())).toEqual([]);
+    expect(compute.topology).toEqual([{role:null,count:1}]);
+    expect(compute.requirements(fixture()).legacy_state_keys).toEqual(['posthog-fixture/posthog-infrastructure.tfstate']);
+  });
+  test("invalid compute inputs fail before execution", () => {
+    for(const update of [{'provider-compute':'unsupported'},{'digitalocean-size':null},{'digitalocean-ssh-sources':[]},{'digitalocean-http-sources':['bad']}]) expect(validate.stateErrors(fixture(update)).length).toBeGreaterThan(0);
+  });
+  test("compute credentials are deferred to library state inspection", () => {
+    const errors=validate.secretErrors(fixture()).join('\n');
+    expect(errors).toContain('COLORS_PAR_CLOUDFLARE_API_TOKEN');
+    expect(errors).not.toContain('COLORS_PAR_VULTR_API_KEY');
+    expect(validate.tofuEnv(fixture(),'provider-compute')).toEqual({});
+  });
+  test("failed lifecycle diagnostics and observed node identity survive", () => {
+    expect(compute.attach(fixture(),{status:'error',errors:['legacy compute state requires migration']})['red/err']).toBe('legacy compute state requires migration');
+    const result=compute.attach(fixture(),{status:'present',cluster:{nodes:[{ip:'203.0.113.7',user:'ubuntu'}]},key:{private_key_path:'/tmp/explicit'}});
+    expect(result.user).toBe('ubuntu');expect(result['ssh-private-key-path']).toBe('/tmp/explicit');
+    expect(compute.attach(fixture(),{status:'destroyed'})['posthog/already-destroyed']).toBe(true);
+    expect(()=>compute.node({cluster:{nodes:[]}})).toThrow();
+  });
+  test("offline start needs no credentials", async()=> {
+    for(const f of [fixture,optout,vultr,vultrOptout]) expect((await workflow.startStep(f({'red/event':'build'}),{}))['red/exit']).toBe(0);
+  });
+  test("managed build and external SSH identities are deterministic",()=> {
+    expect(ssh.withMachineKey(fixture({'red/event':'build'}))['ssh-private-key-path']).toBe('/home/build-placeholder/.ssh/posthog-fixture');
+    expect(ssh.withMachineKey(optout({'red/event':'build'}))).toEqual(optout({'red/event':'build'}));
+    expect(ssh.identityArgs(optout())[1]).toBe('/home/build-placeholder/.ssh/operator-key');
+  });
+});
+
+test("observed non-root login reaches acceptance with sudo",async()=>{
+ let seen:string[]=[];runtime.exec=async(cmd)=>{seen=cmd;return {exit:0,out:'ok',err:''};};
+ await tools.sshOut({ip:'203.0.113.7',user:'ubuntu','ssh-private-key-path':'/tmp/key'},"docker ps --format '{{.Names}}'",1000);
+ expect(seen.at(-2)).toBe('ubuntu@203.0.113.7');expect(seen.at(-1)).toStartWith('sudo -n -- sh -c ');
+});
+test("cleanup IP override follows successful owned-state inspection",async()=>{
+ const stub=spyOn(compute,'load').mockImplementation(async(o)=>({...o,'red/exit':0,ip:'203.0.113.7',user:'ubuntu'}));
+ try{const opts=fixture({...secrets,'red/event':'delete','compute-prevent-destroy':false,ip:'203.0.113.99'});
+ const result=await workflow.startStep(opts,{});expect(stub).toHaveBeenCalled();expect(result.ip).toBe('203.0.113.99');expect(result.user).toBe('ubuntu');
+ stub.mockImplementation(async(o)=>({...o,'red/exit':1,'red/err':'state unreadable'}));expect((await workflow.startStep(opts,{}))['red/exit']).toBe(1);
+ }finally{stub.mockRestore();}
 });

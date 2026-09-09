@@ -13,6 +13,7 @@
 
 profile: posthog-optout
 workdir: WORKDIR
+ssh-private-key-path: /home/build-placeholder/.ssh/operator-key
 
 provider-compute: digitalocean
 provider-dns: cloudflare

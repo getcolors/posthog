@@ -1,0 +1,88 @@
+{
+  "locals": {
+    "ingress": {
+      "http-443:0.0.0.0/0": {
+        "ip_type": "v4",
+        "port": "443",
+        "protocol": "tcp",
+        "subnet": "0.0.0.0",
+        "subnet_size": 0
+      },
+      "http-443:::/0": {
+        "ip_type": "v6",
+        "port": "443",
+        "protocol": "tcp",
+        "subnet": "::",
+        "subnet_size": 0
+      },
+      "http-80:0.0.0.0/0": {
+        "ip_type": "v4",
+        "port": "80",
+        "protocol": "tcp",
+        "subnet": "0.0.0.0",
+        "subnet_size": 0
+      },
+      "http-80:::/0": {
+        "ip_type": "v6",
+        "port": "80",
+        "protocol": "tcp",
+        "subnet": "::",
+        "subnet_size": 0
+      },
+      "ssh:0.0.0.0/0": {
+        "ip_type": "v4",
+        "port": "22",
+        "protocol": "tcp",
+        "subnet": "0.0.0.0",
+        "subnet_size": 0
+      },
+      "ssh:::/0": {
+        "ip_type": "v6",
+        "port": "22",
+        "protocol": "tcp",
+        "subnet": "::",
+        "subnet_size": 0
+      }
+    }
+  },
+  "output": {
+    "params": {
+      "value": {
+        "firewall_group_id": "${vultr_firewall_group.network.id}",
+        "provider": "vultr"
+      }
+    }
+  },
+  "provider": {
+    "vultr": {}
+  },
+  "resource": {
+    "vultr_firewall_group": {
+      "network": {
+        "description": "posthog-vultr-fixture-firewall",
+        "lifecycle": {
+          "prevent_destroy": true
+        }
+      }
+    },
+    "vultr_firewall_rule": {
+      "ingress": {
+        "firewall_group_id": "${vultr_firewall_group.network.id}",
+        "for_each": "${local.ingress}",
+        "ip_type": "${each.value.ip_type}",
+        "port": "${each.value.port}",
+        "protocol": "${each.value.protocol}",
+        "subnet": "${each.value.subnet}",
+        "subnet_size": "${each.value.subnet_size}"
+      }
+    }
+  },
+  "terraform": {
+    "required_providers": {
+      "vultr": {
+        "source": "vultr/vultr",
+        "version": "2.32.0"
+      }
+    }
+  }
+}

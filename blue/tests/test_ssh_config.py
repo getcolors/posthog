@@ -169,4 +169,4 @@ def test_delete_removes_the_block_before_the_destroy():
     delete = {"blue/event": "delete"}
     assert workflow.wire_fn("posthog/dns", delete)[1:] == ("posthog/ssh-config",)
     assert workflow.wire_fn("posthog/ssh-config", delete)[1:] == ("posthog/infrastructure",)
-    assert workflow.wire_fn("posthog/infrastructure", delete)[1:] == ("posthog/ssh-cleanup",)
+    assert workflow.wire_fn("posthog/infrastructure", delete)[1:] == ()

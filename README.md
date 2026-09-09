@@ -6,6 +6,31 @@ single-node PostHog product analytics suite on DigitalOcean or Vultr. Green is
 the canonical implementation; red and blue render byte-identical artifacts,
 verified by `scripts/parity.sh`.
 
+## Compute ownership
+
+The pinned `colors-compute` library owns provider selection, remote S3/R2
+state, deployment coordination, machine keys, network policy and the single
+node. This package supplies singleton topology and SSH/HTTP ingress, then
+uses the returned address, login user and SSH identity for its application
+steps. New provider support belongs in the library; consumers update its pin.
+The application needs a supported Ubuntu image and sufficient memory for
+PostHog and its data services. Build first to check adapter capabilities.
+
+Use `posthog-ssh-sources` and `posthog-http-sources` for neutral CIDR
+allowlists. Existing selected-provider source options remain compatible.
+External account key references require `ssh-private-key-path`; external
+private keys are never generated or removed. The local SSH block writes
+`IdentityFile` only for a managed deployment key.
+
+Existing `<profile>/posthog-infrastructure.tfstate` is refused before
+compute mutation. Do not remove it to bypass this check: migrate ownership
+explicitly or destroy the old deployment through its original version first.
+Unreadable state and provider mismatches fail closed.
+
+The default compute provider remains `digitalocean`. An explicit `COLORS_PAR_IP`
+changes only the delete-cleanup target after a successful owned-state read;
+it cannot bypass unreadable state or provider identity checks.
+
 ## Architecture
 
 Ten containers, and none of them is optional. Upstream's own single-server

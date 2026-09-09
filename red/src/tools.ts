@@ -8,7 +8,7 @@ import * as tofu from "red/tofu";
 import { runtime } from "red/runtime";
 import type { Opts } from "red/workflow";
 import { StepError, failed } from "red/workflow";
-import { compute } from "package-once-red";
+import * as compute from "./compute.ts";
 import * as ssh from "./ssh.ts";
 import * as sshConfig from "./ssh-config.ts";
 import * as utils from "./utils.ts";
@@ -26,8 +26,6 @@ import ansibleCompose from "../resources/tools/ansible/compose.yml" with { type:
 import ansibleMain from "../resources/tools/ansible/main.yml" with { type: "text" };
 import ansibleOwner from "../resources/tools/ansible/owner.py" with { type: "text" };
 import dnsMainTf from "../resources/tools/dns/main.tf" with { type: "text" };
-import infrastructureDigitaloceanTf from "../resources/tools/infrastructure/digitalocean/main.tf" with { type: "text" };
-import infrastructureVultrTf from "../resources/tools/infrastructure/vultr/main.tf" with { type: "text" };
 
 export const infrastructureTool = "posthog-infrastructure";
 export const dnsTool = "posthog-dns";
@@ -55,8 +53,6 @@ const templates: Record<string, string> = {
   "ansible/main.yml": ansibleMain,
   "ansible/owner.py": ansibleOwner,
   "dns/main.tf": dnsMainTf,
-  "infrastructure/digitalocean/main.tf": infrastructureDigitaloceanTf,
-  "infrastructure/vultr/main.tf": infrastructureVultrTf,
 };
 
 export function template(path: string, file: string): Template {
@@ -71,10 +67,6 @@ function spec(source: Template, target: string, data: Opts): Spec {
 }
 
 const rawSpec = (target: string, content: string): Spec => contentSpec(target, content);
-
-export function cidrs(opts: Opts, k: string): string[] {
-  return validate.cidrs(opts, k);
-}
 
 export function credentialEnv(opts: Opts, ...slots: string[]): Record<string, string> | undefined {
   const merged: Record<string, string> = {};
@@ -96,47 +88,8 @@ export function backendCredentialEnv(opts: Opts): Record<string, string> | undef
 // What `build` and `--dry-run` render in place of a compute output: the
 // documentation address, shaped like the selected provider's real `params` so
 // every later stage sees the same keys either way. ONCE's.
-export const fallbackParams = compute.fallbackParams;
-
-// Template values for the compute stage. The source lists are read through
-// `computeKey`, so the same data serves every provider's template.
-export function infrastructureData(opts: Opts): Opts {
-  const httpSources = cidrs(opts, validate.computeKey(opts, "http-sources"));
-  return {
-    ...opts,
-    "ssh-keygen": validate.keygen(opts),
-    "compute-name": validate.computeName(opts),
-    "ssh-sources-hcl": tofu.hclList(cidrs(opts, validate.computeKey(opts, "ssh-sources"))),
-    "http-sources-hcl": tofu.hclList(httpSources),
-    // An empty http list means no public HTTP: the 80/443 rules are left out
-    // rather than rendered with an empty source list, which the DigitalOcean
-    // API rejects. Vultr's rules are a for_each over the set and vanish on
-    // their own.
-    "http-sources?": httpSources.length > 0,
-  };
-}
-
-// Providers are selected by template directory, never by conditionals inside
-// one file (Compute Provider Standard §3): `tools/infrastructure/<provider>/`.
-export function infrastructureTemplate(opts: Opts): Template {
-  return template(`infrastructure.${opts["provider-compute"]}`, "main.tf");
-}
-
-// Refuse to hand 192.0.2.10 to Ansible on a real converge whose compute output
-// carries no `ip`. ONCE's; `infrastructureStep` is what wires it.
-export const resolvedCompute = compute.resolvedCompute;
-
-export async function infrastructureStep(opts: Opts): Promise<Opts> {
-  const dir = toolDir(opts, infrastructureTool);
-  const specs = [spec(infrastructureTemplate(opts), `${dir}/main.tf`,
-    infrastructureData(opts))];
-  const result = await tofu.tofuWithSpec(opts, specs,
-    { dir, env: credentialEnv(opts, "provider-compute") });
-  if (failed(result)) return result;
-  if (opts["red/event"] === "build") return { ...result, ...fallbackParams(opts) };
-  if (opts["red/event"] === "delete") return result;
-  return resolvedCompute(result, fallbackParams(opts), compute.outputParams(result));
-}
+export function fallbackParams(opts:Opts){if(["create","delete"].includes(opts["red/event"])&&!opts["red/dry-run"])throw Error("compute node unavailable");return compute.node(compute.planned(opts));}
+export const infrastructureStep=compute.infrastructureStep;
 
 export function zoneId(_zone: unknown): string {
   return "${data.cloudflare_zone.zone.id}";
@@ -229,7 +182,7 @@ function pretty(value: unknown, indent = 0): string {
 export function ansibleLocalData(opts: Opts): Opts {
   return {
     ...opts,
-    "ssh-keygen": validate.keygen(opts),
+    "ssh-keygen": validate.keygen(opts), "ssh-identity-present":Boolean(opts["ssh-private-key-path"]),
     "ssh-config-identity-file": sshConfig.identityFile(opts),
   };
 }
@@ -271,8 +224,8 @@ export function inventory(opts: Opts): string {
         posthog: {
           hosts: {
             [String(opts.profile)]: {
-              ansible_host: opts.ip ?? "192.0.2.10",
-              ansible_user: "root",
+              ansible_host: opts.ip ?? fallbackParams(opts).ip,
+              ansible_user: opts.user ?? fallbackParams(opts).user,
             },
           },
         },
@@ -287,8 +240,8 @@ export function inventory(opts: Opts): string {
 export function ansibleData(opts: Opts): Opts {
   return {
     ...opts,
-    ip: opts.ip ?? "192.0.2.10",
-    "ssh-keygen": validate.keygen(opts),
+    ip: opts.ip ?? fallbackParams(opts).ip,
+    "ssh-keygen": validate.keygen(opts), "ssh-identity-present":Boolean(opts["ssh-private-key-path"]),
     "posthog-web-port": opts["posthog-web-port"] ?? 8000,
     "posthog-backup-access-key": "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_ACCESS_KEY_ID') }}",
     "posthog-backup-secret-key": "{{ lookup('env','COLORS_PAR_POSTHOG_BACKUP_R2_SECRET_ACCESS_KEY') }}",
@@ -313,15 +266,7 @@ export function ansibleSpecs(opts: Opts): Spec[] {
 
 export async function ansibleStep(opts: Opts): Promise<Opts> {
   const dir = toolDir(opts, ansibleTool);
-  if (opts["red/event"] === "delete" && !opts.ip) {
-    // No compute in state: there is no host to clean up, and the rendered
-    // inventory would fall back to 192.0.2.10. Remove the rendered tree the
-    // way a completed cleanup would and let the teardown continue.
-    return {
-      ...scaffold(opts, ansibleSpecs(opts)),
-      "red/exit": 0, "posthog/cleanup": "skipped-no-compute",
-    };
-  }
+  if (["create","delete"].includes(opts["red/event"]) && !opts["red/dry-run"] && !opts.ip) return {...opts,"red/exit":1,"red/err":"compute node unavailable"};
   return ansible.ansibleWithSpec(opts, {
     dir, inventory: "inventory.json",
     playbooks: { create: "main.yml", delete: "cleanup.yml" },
@@ -356,7 +301,7 @@ export async function httpStatus(args: string[]): Promise<string | undefined> {
 export async function sshOut(opts: Opts, command: string, timeout: number): Promise<string | undefined> {
   const r = await runtime.exec(
     ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-      ...ssh.identityArgs(opts), `root@${opts.ip}`, command], { timeoutMs: timeout });
+      ...ssh.identityArgs(opts), `${opts.user??"root"}@${opts.ip}`, (opts.user??"root")==="root"?command:"sudo -n -- sh -c "+"'"+command.replaceAll("'", "'\"'\"'")+"'"], { timeoutMs: timeout });
   return r.exit === 0 ? r.out.trim() : undefined;
 }
 
